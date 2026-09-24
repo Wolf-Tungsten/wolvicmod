@@ -1,0 +1,24 @@
+# Vendored: gtkwave/libfst
+
+- Source: https://github.com/gtkwave/libfst
+- Commit: c716c1f67e21a06aaf8722830b371516e70dc657 (branch `main`)
+- License: MIT (Tony Bybell), see `LICENSE` — compatible with wolvicmod's MIT.
+
+## Files taken
+
+- `src/fstapi.c`, `src/fstapi.h` — FST reader/writer API
+- `src/fastlz.c`, `src/fastlz.h`, `src/lz4.c`, `src/lz4.h` — compression used by the writer
+- `src/fst_win_unistd.h` — Windows compatibility (unused on Linux)
+- `doc/block_format.txt` — FST block format reference
+
+Upstream's `tests/` and meson build files are not taken; building is handled by
+`CMakeLists.txt` in this directory.
+
+## Build notes
+
+- Compiled without `FST_INCLUDE_CONFIG`: no `config.h` is needed on Linux when
+  building with `-D_GNU_SOURCE` (`fseeko`/`realpath` are available).
+- `FST_WRITER_PARALLEL` auto-disables without `HAVE_LIBPTHREAD`: no pthread
+  dependency (single-threaded writer).
+- bzip2 is not used by `fstapi.c` (upstream meson links it for other tools).
+- Only external dependency: zlib (`find_package(ZLIB)`).
