@@ -62,12 +62,8 @@ struct Counter : Module {
     REG(uint32_t, cnt);
 
     Counter() {
-        cnt.update().on(negedge(rst_n)) = 0;                 // 复位：先注册，优先级高
-        cnt.update().on(posedge(clk)).en(en).reads(cnt)      // 计数：上升沿且 en 有效
-            = [](auto src) {
-                auto [c] = src;
-                return c + 1;
-            };
+        cnt.update().on(negedge(rst_n)) = 0;           // 复位：先注册，优先级高
+        cnt.update().on(posedge(clk)).en(en) = cnt + 1; // 计数：上升沿且 en 有效
         dout = cnt;
     }
 };
