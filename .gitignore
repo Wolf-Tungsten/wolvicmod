@@ -67,3 +67,9 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Mill / Scala 构建产物（verify/refgen 的 out 是指向 verify/out/mill 的符号链接）
+out
+
+# 波形转储
+*.fst

@@ -242,9 +242,93 @@ top.assertUpdateMutexOn();    // 同一状态多条 Update 同 round 激活时�
 top.assertUpdateMutexOff();   // （默认关：注册序优先级静默生效，不视为错误）
 ```
 
+### 3.9 编码约定：同名解包
+
+Assign/Update lambda 的 `src` 解包绑定名必须与 `.reads(...)` 中的信号名**一致、顺序一致**：
+
+```cpp
+// 正确：
+out.assign().reads(in, free_id) = [](auto src) {
+    auto [in, free_id] = src;
+    ...
+};
+// 错误（缩写/错位别名）：
+out.assign().reads(in, free_id) = [](auto src) {
+    auto [v, fid] = src;   // 不准
+    ...
+};
+```
+
+配套规则：
+
+- lambda 内的局部临时变量不得与信号同名（避免遮蔽误读）；
+- `Mem` 进读集同样同名：`mem.update().on(posedge(clk)).addr(waddr).reads(mem, rdata) = [](auto src){ auto [mem, rdata] = src; ... };`
+- 读集里是子模块端口时，绑定名按层次路径展开（点/箭头替换为下划线）：`.reads(arb_lo.in_rdy, arb_hi.in_rdy)` → `auto [arb_lo_in_rdy, arb_hi_in_rdy] = src;`
+- 捕获列表（如 `[i]`）不受此约定约束。
+
+这是**约定而非编译期检查**：框架只静态校验 lambda 可按读集类型调用（§3.1 的 `is_invocable`），绑定名是否贴信号名靠代码评审与本约定维持；`auditOn()`（§3.8）能抓住"偷读未声明实体"，但不检查命名。同名解包的意义在于读代码/对拍时读集与使用点零映射成本，并防止解包顺序与读集顺序错位这类静默 bug。
+
 ---
 
-## 4. 速查手册
+## 4. 预制菜库（prefab）
+
+`include/wolvicmod/prefab/` 下是一套**可复用时序元件库**（伞头文件 `<wolvicmod/prefab/prefab.h>`，命名空间 `wolvicmod::prefab`）：chisel3 标准库语义对齐的 Queue / 仲裁器 / ValidPipe。它们全部是用框架 API 写成的普通库模块——不改动 core/elab/sim 任何框架机制，不引入全局状态——每个元件与参考 RTL **拍级对齐**，配套 doctest 单测（`tests/test_prefab_*.cpp`）逐拍验证。
+
+**收录标准（边界说明）**：本库只收 **chisel3 标准库（`chisel3.util`）语义、框架通用**的元件。XiangShan 生态（xs-utils / dongjiang）特有的元件**不属于本仓**，放在项目侧（如 `proj-xiangshan-l3/prefab/`，命名空间 `zj::prefab`）——它们不通用，举例：
+
+- **FastQueue**（xs-utils）：移位压实队列 + 寄存 enq_rdy，是 xs-utils 为特定微结构写的变体，并非 chisel 标准队列族成员；
+- **VipArbiter**（xs-utils）：vip 指针粘性授权是 xs-utils 自有仲裁策略；
+- **QosRRArb / QosFixedArb**（dongjiang `FastArb`）：`qos == 0xf` 拆 high/low 两组再各自仲裁、hasHigh 抢占——这是 dongjiang 特有的 CHI 风味结构（qos 字段取值与分组阈值都由使用方约定），且其 "RR" 子仲裁器实为 xs-utils VipArbiter；
+- **Alloc**（dongjiang）：首个空闲项分配是 dongjiang 的池分配辅助；
+- **SpSram / DpSram**（xs-utils SRAM 模板）：`kIsc`（setup/extraHold 输入稳定拍数）、`intvCnt` 回压间隔、复位横扫、way 掩码等都是 xs-utils SRAMTemplate 族的特有行为约定，不是通用存储器语义。
+
+**通道约定**（`prefab/dec.h`）：Decoupled 通道 = 两个端口——载荷 `Dec<T> { bool valid; T bits; }` 合体一根端口，反压是独立的 `xxx_rdy` bool 端口；fire = valid && rdy。生产者侧 `Out<Dec<T>> xxx` + `In<bool> xxx_rdy`；消费者侧反之。Valid-only 通道（如 ValidPipe 出口）没有 rdy 端口。所有元件首端口均为 `In<bool> clk`（纯组合元件仅作接口统一，不采样）。
+
+### Queue<T, N, Flow=false, Pipe=false>（`prefab/queue.h`）
+
+- **对拍对象**：`chisel3.util.Queue`。
+- **语义**：`Mem<T,N> ram` + 模 N 的 `enq_ptr/deq_ptr` + `maybe_full`；`empty = ptr_match && !maybe_full`，`full = ptr_match && maybe_full`。`do_enq` 时写 ram、enq_ptr++，`do_deq` 时 deq_ptr++，`do_enq != do_deq` 时 `maybe_full ← do_enq`。Flow：空时 deq 同拍直通（`deq.valid = !empty || enq.valid`，`deq.bits = empty ? enq.bits : ram[deq_ptr]`）；Pipe：`enq_rdy = !full || deq_rdy`，满且 deq_rdy 的同拍读写同址、读侧见旧值（wolvicmod Mem 天然满足）。
+- **端口**：`enq`/`enq_rdy`、`deq`/`deq_rdy`，另带 `count`（占位数，便于水位逻辑）。
+- **取舍**：chisel 源码在空直通**被消费**的那拍强制 `do_enq/do_deq` 均为 false——直通数据不写入 ram、指针不动（无"幻影拷贝"），本库照此实现。
+
+### 仲裁器（`prefab/arb.h`）
+
+统一端口形态（阵列端口）：输入侧一路 `In<std::array<Dec<T>,N>> in` + 一路 `Out<std::array<bool,N>> in_rdy`；输出侧 `out`/`out_rdy`；另带 `Out<uint32_t> chosen`。
+
+- **FixedArb<T,N>**：对拍 `chisel3 Arbiter`——in[0] 优先级最高，全组合；`in_rdy[i] = out_rdy && 前面无 valid`（**ready 不门控自身 valid**：低于首个 valid 的路即使无效也 ready，不会多 fire——它们无效）；空闲时 chosen 归 N-1（同 chisel 默认）。
+- **RRArb<T,N>**：对拍 `chisel3 RRArbiter`——`last_grant` 寄存器两遍优先级（先扫 last_grant+1..N-1，再扫 0..last_grant），`out.fire` 时 `last_grant ← chosen`；ready 同样不门控自身 valid（两遍结构，见 RRArbRef_n4 对拍实证）；last_grant 初值 0（chisel 为 RegEnable 无复位，按 Verilator 两态语义取 0）。
+
+### ValidPipe<T, N=1>（`prefab/pipe.h`）
+
+- **对拍对象**：`chisel3.util.Pipe(enqValid, enqBits, N)`。
+- **语义**：valid 每级 RegNext（初值 false），bits 每级 RegEnable（仅当上级 valid 时前进）——valid 精确延迟 N 拍，bits 随对应 valid 的那一份；stall 时气泡逐拍传播、bits 保持。
+- **端口**：`enq`（Valid-only 入口）、`deq`。
+
+### 已知语义取舍汇总
+
+| 取舍 | 说明 |
+|---|---|
+| RegEnable 无复位初值 | 一律按 Verilator 两态语义取 0（RRArb `last_grant`、ValidPipe 各级 bits），源码中相应位置均有注释 |
+| chisel Queue flow 无幻影拷贝 | 空直通被消费的那拍 do_enq/do_deq 均为 false（与"幻影拷贝"模型可观测等价，指针/ram 内部轨迹不同；本库按 chisel 源码实现） |
+
+### tests 与 verify 的职责划分
+
+预制菜有两套并列、各自独立运行的验证：
+
+| | `tests/`（单元测试） | `verify/`（RTL 对拍） |
+|---|---|---|
+| 定位 | 语义文档 + 快速回归 | 与真实 RTL 的等价性证明 |
+| 依赖 | 纯 C++（doctest），无外部工具 | mill + chisel + firtool + Verilator |
+| 耗时 | 毫秒级 | 分钟级 |
+| 跑法 | `make test` 或 `ctest`（每测试文件独立条目，`ctest -R <模块>` 单跑） | `make cosim [M=模块]` 或 `verify/run.sh [queue\|pipe\|arb]`（模块可单跑） |
+
+`verify/` 用 chisel 7.13.0 真实源码生成 SystemVerilog（`refgen/`，独立 mill 项目、只依赖 chisel ivy 包）、Verilator 编译后与预制菜同激励逐拍比对（`cosim/`）：Queue 5 配置 / ValidPipe 3 / FixedArb+RRArb 各 1，共 10 配置 × 3 seed、330 万拍 / 1241 万次输出比对，零失配。详见 `verify/README.md`。**本目录纯 run.sh 驱动，不接入 CMake 默认构建；全部生成物在 `build/verify/` 下（`build/` 已入 .gitignore）。**
+
+XiangShan 生态元件（FastQueue / VipArb / QoS 仲裁 / Alloc / SRAM 模板）的单测与 RTL 对拍都在项目侧（`proj-xiangshan-l3/tests/` 与 `proj-xiangshan-l3/verify/`），见上述"收录标准"。
+
+---
+
+## 5. 速查手册
 
 ### 声明宏
 
@@ -311,8 +395,12 @@ top.x.get();           观察任意实体
 ## 仓库布局与许可
 
 ```
+Makefile             一键入口：make test（单测）/ make cosim [M=模块]（RTL 对拍）
 include/wolvicmod/   框架头文件（core/ elab/ sim/ dbg/ wave/）
-tests/               doctest 单测
+include/wolvicmod/prefab/  预制菜时序元件库（dec/ queue/ arb/ pipe，§4）
+tests/               doctest 单测（框架 test_*.cpp + 预制菜 test_prefab_*.cpp，逐文件独立 ctest 条目）
+verify/              通用预制菜 vs chisel3 RTL 的 Verilator 对拍（§4，run.sh 驱动，不入 CMake；
+                     生成物全部在 build/verify/ 下）
 third_party/         doctest（单头）、libfst（gtkwave，MIT）
 ```
 

@@ -9,8 +9,13 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 file(GLOB WOLVICMOD_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/test_*.cpp)
+list(REMOVE_ITEM WOLVICMOD_TEST_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/test_main.cpp)
 
-add_executable(wolvicmod_tests test_main.cpp ${WOLVICMOD_TEST_SOURCES})
-target_link_libraries(wolvicmod_tests PRIVATE wolvicmod wolvicmod_test_flags)
-
-add_test(NAME wolvicmod_tests COMMAND wolvicmod_tests)
+# 每个 test 源文件一个可执行 + 独立 ctest 条目（ctest -R <模块> 可单跑）；
+# test_main.cpp 是 doctest main，逐文件复用链接。
+foreach(src ${WOLVICMOD_TEST_SOURCES})
+    get_filename_component(name ${src} NAME_WE)
+    add_executable(${name} test_main.cpp ${src})
+    target_link_libraries(${name} PRIVATE wolvicmod wolvicmod_test_flags)
+    add_test(NAME ${name} COMMAND ${name})
+endforeach()

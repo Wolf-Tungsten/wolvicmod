@@ -1,0 +1,31 @@
+package build
+
+import mill._
+import mill.scalalib._
+
+// refgen：wolvicmod 通用预制菜的 Chisel 参考源生成器。**完全自给自足**——
+// 只依赖 chisel 7.13.0（ivy，钉死 XiangShan kunminghu-v3 build.mill 的版本），
+// 不涉及任何 XiangShan 源码。生成 chisel3.util.Queue / Pipe / Arbiter /
+// RRArbiter 的参考 SV（firtool 由 firtool-resolver 解析到缓存的 1.149.0）。
+
+object refgen extends ScalaModule {
+  def scalaVersion = "2.13.17"
+
+  def mainClass = Some("refgen.RefGen")
+
+  def scalacOptions = Seq("-language:reflectiveCalls", "-Ymacro-annotations", "-Ytasty-reader")
+
+  def ivyDeps = Agg(
+    mvn"org.chipsalliance::chisel:7.13.0",
+    mvn"com.lihaoyi::sourcecode:0.4.4",
+    mvn"org.chipsalliance::firtool-resolver:2.1.1",  // main() 里直接 Resolve 到缓存的 firtool
+  )
+
+  def scalacPluginIvyDeps = Agg(mvn"org.chipsalliance:::chisel-plugin:7.13.0")
+
+  // 注意：mill 0.12 的 moduleDir 会拼上对象名（verify/refgen/refgen），
+  // 这里直接用 workspace 根目录
+  def sources = Task.Sources {
+    Seq(PathRef(os.Path(sys.env("MILL_WORKSPACE_ROOT")) / "src"))
+  }
+}
