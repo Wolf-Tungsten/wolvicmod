@@ -13,6 +13,7 @@
 #include "wolvicmod/core/edge.h"
 #include "wolvicmod/core/action.h"
 #include "wolvicmod/core/expr.h"
+#include "wolvicmod/core/collect.h"
 
 #include "wolvicmod/elab/elaborate.h"
 #include "wolvicmod/sim/engine.h"
