@@ -1,5 +1,5 @@
-// core/collect.h：combine 原语（N 个同值类型可读实体 → 一路 std::array 值
-// 信号）与 collectPorts 复合便捷。涵盖子模块端口数组、Reg 指针数组、Out
+// core/collect.h：combine 三重重载——实体指针数组原语、子模块数组 + 端口提取
+// lambda、实体指针数组 + 投影 lambda。涵盖子模块端口数组、Reg 指针数组、Out
 // 目标、以及跨层级合并的可见性审计（§2.2）。
 
 #include <array>
@@ -13,7 +13,7 @@ using namespace wolvicmod;
 
 namespace {
 
-// 子模块：一个 In 一个 Out（直通），供指针数组持有。
+// 子模块：一个 In 一个 Out（直通）。
 struct Cell : Module {
     IN(uint32_t, din);
     OUT(uint32_t, dout);
@@ -21,28 +21,25 @@ struct Cell : Module {
     Cell() { dout = din; }
 };
 
-using U32x4 = std::array<uint32_t, 4>;  // 宏只收 2 参，含逗号类型先取别名
+using U32x4 = std::array<uint32_t, 4>;  // 宏只收定长参数，含逗号类型先取别名
 using U32x3 = std::array<uint32_t, 3>;
 using U32x1 = std::array<uint32_t, 1>;
 
-// 父模块：根输入数组散布到 4 个 Cell → combine 回数组 Wire → 求和 Out。
+// 重载 2（子模块数组 + 端口提取）：根输入数组散布到 4 个 Cell → combine 回
+// 数组 Wire → 求和 Out。
 struct CellPool : Module {
     IN(U32x4, din);
     WIRE(U32x4, lanes);
     OUT(uint32_t, sum);
-    std::array<Cell*, 4> cells{};
 
     CellPool() {
-        for (uint32_t i = 0; i < 4; ++i) {
-            cells[i] = &createChildModule<Cell>("cell_" + std::to_string(i));
-            cells[i]->din.assign().reads(din) = [i](auto src) {  // 散布：普通循环
+        auto cells = createChildModuleArray<Cell, 4>("cell");
+        for (uint32_t i = 0; i < 4; ++i)
+            cells[i].din.assign().reads(din) = [i](auto src) {  // 散布：普通循环
                 auto [a] = src;
                 return a[i];
             };
-        }
-        std::array<Out<uint32_t>*, 4> outs{};
-        for (uint32_t i = 0; i < 4; ++i) outs[i] = &cells[i]->dout;
-        combine(lanes, outs);
+        combine(lanes, cells, [](Cell& c) -> Out<uint32_t>& { return c.dout; });
         sum.assign().reads(lanes) = [](auto src) {
             auto [a] = src;
             return a[0] + a[1] + a[2] + a[3];
@@ -50,7 +47,7 @@ struct CellPool : Module {
     }
 };
 
-// Reg 指针数组 → combine；目标为 Out（dst 泛化到 Signal）。
+// 重载 1（原语）：Reg 指针数组 → combine；目标为 Out（dst 泛化到 Signal）。
 struct RegPool : Module {
     IN(bool, clk);
     OUT(U32x3, arr_out);
@@ -65,6 +62,19 @@ struct RegPool : Module {
             };
         }
         combine(arr_out, regs);
+    }
+};
+
+// 重载 3（指针数组 + 投影 lambda）：对裸信号投影即恒等（展示重载形状；复合
+// holder 的端口提取见重载 2）。
+struct ProjPool : Module {
+    OUT(U32x3, arr_out);
+    std::array<In<uint32_t>*, 3> ins{};
+
+    ProjPool() {
+        for (uint32_t i = 0; i < 3; ++i)
+            ins[i] = &createIn<uint32_t>("in_" + std::to_string(i));
+        combine(arr_out, ins, [](In<uint32_t>& x) -> In<uint32_t>& { return x; });
     }
 };
 
@@ -87,7 +97,7 @@ struct BadTop : Module {
 
 }  // namespace
 
-TEST_CASE("collect: combine 子模块端口数组并逐拍反映输入") {
+TEST_CASE("combine: 子模块数组 + 端口提取，逐拍反映输入") {
     CellPool top;
     top.elaborate();
     top.din.set({10, 20, 30, 40});
@@ -101,7 +111,7 @@ TEST_CASE("collect: combine 子模块端口数组并逐拍反映输入") {
     CHECK(top.sum.get() == 169);
 }
 
-TEST_CASE("collect: combine Reg 指针数组到 Out 目标") {
+TEST_CASE("combine: Reg 指针数组（原语）到 Out 目标") {
     RegPool top;
     top.elaborate();
     top.clk.set(0);
@@ -117,6 +127,19 @@ TEST_CASE("collect: combine Reg 指针数组到 Out 目标") {
     CHECK(top.arr_out.get() == std::array<uint32_t, 3>{2, 4, 6});
 }
 
-TEST_CASE("collect: 跨层级合并孙模块端口被可见性审计拒绝") {
+TEST_CASE("combine: 指针数组 + 投影 lambda") {
+    ProjPool top;
+    top.elaborate();
+    top.ins[0]->set(11);
+    top.ins[1]->set(22);
+    top.ins[2]->set(33);
+    top.eval();
+    CHECK(top.arr_out.get() == std::array<uint32_t, 3>{11, 22, 33});
+    top.ins[1]->set(99);
+    top.eval();
+    CHECK(top.arr_out.get() == std::array<uint32_t, 3>{11, 99, 33});
+}
+
+TEST_CASE("combine: 跨层级合并孙模块端口被可见性审计拒绝") {
     CHECK_THROWS_AS(BadTop{}, Error);
 }
