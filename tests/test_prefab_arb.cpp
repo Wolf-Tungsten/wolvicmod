@@ -16,7 +16,7 @@ using namespace prefabtest;
 
 namespace {
 
-using InArr4 = std::array<Dec<uint32_t>, 4>;
+using InArr4 = std::array<Valid<uint32_t>, 4>;
 
 TEST_CASE("prefab FixedArb: in[0] 优先级最高，全组合") {
     FixedArb<uint32_t, 4> top;

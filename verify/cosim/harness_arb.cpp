@@ -31,7 +31,7 @@ uint64_t cosimArb(const char* comp, const char* cfg, uint32_t seed, uint64_t cyc
     cosim::Stats st;
     cosim::Replay rp;
     constexpr uint32_t N = 4;
-    using InArr = std::array<Dec<uint32_t>, N>;
+    using InArr = std::array<Valid<uint32_t>, N>;
 
     cosim::resetRef(ref, [&] {
         ref.in_valid = 0;

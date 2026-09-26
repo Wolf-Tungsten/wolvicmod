@@ -19,7 +19,7 @@
 
 #include "wolvicmod/core/edge.h"
 #include "wolvicmod/core/module.h"
-#include "wolvicmod/prefab/dec.h"
+#include "wolvicmod/prefab/valid.h"
 
 namespace wolvicmod::prefab {
 
@@ -27,12 +27,12 @@ template <class T, uint32_t N, bool Flow = false, bool Pipe = false>
 class Queue : public Module {
 public:
     static_assert(N >= 1, "Queue requires N >= 1");
-    using DecT = Dec<T>;
+    using ValidT = Valid<T>;
 
     IN(bool, clk);
-    IN(DecT, enq);
+    IN(ValidT, enq);
     OUT(bool, enq_rdy);
-    OUT(DecT, deq);
+    OUT(ValidT, deq);
     IN(bool, deq_rdy);
     OUT(uint32_t, count);
 
@@ -60,7 +60,7 @@ public:
         if constexpr (Flow) {
             deq.assign().reads(w_empty, enq, ram, deq_ptr) = [](auto src) {
                 auto [w_empty, enq, ram, deq_ptr] = src;
-                DecT o;
+                ValidT o;
                 o.valid = !w_empty || enq.valid;
                 o.bits = w_empty ? enq.bits : ram[deq_ptr];
                 return o;
@@ -68,7 +68,7 @@ public:
         } else {
             deq.assign().reads(w_empty, ram, deq_ptr) = [](auto src) {
                 auto [w_empty, ram, deq_ptr] = src;
-                DecT o;
+                ValidT o;
                 o.valid = !w_empty;
                 o.bits = ram[deq_ptr];
                 return o;

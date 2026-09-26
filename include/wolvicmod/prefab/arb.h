@@ -5,8 +5,8 @@
 // （XiangShan 生态的 VipArbiter / QoS 仲裁 / Alloc 属项目侧元件，见
 //  proj-xiangshan-l3/prefab/xsarb.h。）
 //
-// 统一端口形态（阵列端口）：输入侧一路 In<std::array<Dec<T>,N>> in + 一路
-// Out<std::array<bool,N>> in_rdy；输出侧 Out<Dec<T>> out + In<bool> out_rdy；
+// 统一端口形态（阵列端口）：输入侧一路 In<std::array<Valid<T>,N>> in + 一路
+// Out<std::array<bool,N>> in_rdy；输出侧 Out<Valid<T>> out + In<bool> out_rdy；
 // 另有 Out<uint32_t> chosen（当前授权索引）。clk 端口仅为接口统一；纯组合的
 // FixedArb 不采样它。
 
@@ -15,7 +15,7 @@
 
 #include "wolvicmod/core/edge.h"
 #include "wolvicmod/core/module.h"
-#include "wolvicmod/prefab/dec.h"
+#include "wolvicmod/prefab/valid.h"
 
 namespace wolvicmod::prefab {
 
@@ -25,14 +25,14 @@ template <class T, uint32_t N>
 class FixedArb : public Module {
 public:
     static_assert(N >= 1);
-    using DecT = Dec<T>;
-    using InArr = std::array<DecT, N>;  // 宏参数含逗号，先取别名
+    using ValidT = Valid<T>;
+    using InArr = std::array<ValidT, N>;  // 宏参数含逗号，先取别名
     using RdyArr = std::array<bool, N>;
 
     IN(bool, clk);  // 纯组合元件，clk 仅为接口统一保留
     IN(InArr, in);
     OUT(RdyArr, in_rdy);
-    OUT(DecT, out);
+    OUT(ValidT, out);
     IN(bool, out_rdy);
     OUT(uint32_t, chosen);
 
@@ -45,7 +45,7 @@ public:
         };
         out.assign().reads(in, chosen) = [](auto src) {
             auto [in, chosen] = src;
-            DecT o;
+            ValidT o;
             for (uint32_t i = 0; i < N; ++i) o.valid = o.valid || in[i].valid;
             o.bits = in[chosen].bits;
             return o;
@@ -74,14 +74,14 @@ template <class T, uint32_t N>
 class RRArb : public Module {
 public:
     static_assert(N >= 1);
-    using DecT = Dec<T>;
-    using InArr = std::array<DecT, N>;  // 宏参数含逗号，先取别名
+    using ValidT = Valid<T>;
+    using InArr = std::array<ValidT, N>;  // 宏参数含逗号，先取别名
     using RdyArr = std::array<bool, N>;
 
     IN(bool, clk);
     IN(InArr, in);
     OUT(RdyArr, in_rdy);
-    OUT(DecT, out);
+    OUT(ValidT, out);
     IN(bool, out_rdy);
     OUT(uint32_t, chosen);
 
@@ -100,7 +100,7 @@ public:
         };
         out.assign().reads(in, chosen) = [](auto src) {
             auto [in, chosen] = src;
-            DecT o;
+            ValidT o;
             for (uint32_t i = 0; i < N; ++i) o.valid = o.valid || in[i].valid;
             o.bits = in[chosen].bits;
             return o;

@@ -15,7 +15,7 @@
 
 #include "wolvicmod/core/edge.h"
 #include "wolvicmod/core/module.h"
-#include "wolvicmod/prefab/dec.h"
+#include "wolvicmod/prefab/valid.h"
 
 namespace wolvicmod::prefab {
 
@@ -23,7 +23,7 @@ template <class T, uint32_t N = 1>
 class ValidPipe : public Module {
 public:
     static_assert(N >= 1, "ValidPipe requires N >= 1");
-    using DecT = Dec<T>;
+    using ValidT = Valid<T>;
 
     struct Stage {
         bool valid = false;  // RegNext(init false)
@@ -34,15 +34,15 @@ public:
     using StageArr = std::array<Stage, N>;
 
     IN(bool, clk);
-    IN(DecT, enq);   // Valid-only 入口：无反压
-    OUT(DecT, deq);
+    IN(ValidT, enq);   // Valid-only 入口：无反压
+    OUT(ValidT, deq);
 
     REG(StageArr, stages);
 
     ValidPipe() {
         deq.assign().reads(stages) = [](auto src) {
             auto [stages] = src;
-            DecT o;
+            ValidT o;
             o.valid = stages[N - 1].valid;
             o.bits = stages[N - 1].bits;
             return o;

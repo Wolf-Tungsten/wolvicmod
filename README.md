@@ -285,7 +285,7 @@ out.assign().reads(in, free_id) = [](auto src) {
 - **Alloc**（dongjiang）：首个空闲项分配是 dongjiang 的池分配辅助；
 - **SpSram / DpSram**（xs-utils SRAM 模板）：`kIsc`（setup/extraHold 输入稳定拍数）、`intvCnt` 回压间隔、复位横扫、way 掩码等都是 xs-utils SRAMTemplate 族的特有行为约定，不是通用存储器语义。
 
-**通道约定**（`prefab/dec.h`）：Decoupled 通道 = 两个端口——载荷 `Dec<T> { bool valid; T bits; }` 合体一根端口，反压是独立的 `xxx_rdy` bool 端口；fire = valid && rdy。生产者侧 `Out<Dec<T>> xxx` + `In<bool> xxx_rdy`；消费者侧反之。Valid-only 通道（如 ValidPipe 出口）没有 rdy 端口。所有元件首端口均为 `In<bool> clk`（纯组合元件仅作接口统一，不采样）。
+**通道约定**（`prefab/valid.h`）：Decoupled 通道 = 两个端口——载荷 `Valid<T> { bool valid; T bits; }` 合体一根端口，反压是独立的 `xxx_rdy` bool 端口；fire = valid && rdy。生产者侧 `Out<Valid<T>> xxx` + `In<bool> xxx_rdy`；消费者侧反之。Valid-only 通道（如 ValidPipe 出口）没有 rdy 端口。所有元件首端口均为 `In<bool> clk`（纯组合元件仅作接口统一，不采样）。
 
 ### Queue<T, N, Flow=false, Pipe=false>（`prefab/queue.h`）
 
@@ -296,7 +296,7 @@ out.assign().reads(in, free_id) = [](auto src) {
 
 ### 仲裁器（`prefab/arb.h`）
 
-统一端口形态（阵列端口）：输入侧一路 `In<std::array<Dec<T>,N>> in` + 一路 `Out<std::array<bool,N>> in_rdy`；输出侧 `out`/`out_rdy`；另带 `Out<uint32_t> chosen`。
+统一端口形态（阵列端口）：输入侧一路 `In<std::array<Valid<T>,N>> in` + 一路 `Out<std::array<bool,N>> in_rdy`；输出侧 `out`/`out_rdy`；另带 `Out<uint32_t> chosen`。
 
 - **FixedArb<T,N>**：对拍 `chisel3 Arbiter`——in[0] 优先级最高，全组合；`in_rdy[i] = out_rdy && 前面无 valid`（**ready 不门控自身 valid**：低于首个 valid 的路即使无效也 ready，不会多 fire——它们无效）；空闲时 chosen 归 N-1（同 chisel 默认）。
 - **RRArb<T,N>**：对拍 `chisel3 RRArbiter`——`last_grant` 寄存器两遍优先级（先扫 last_grant+1..N-1，再扫 0..last_grant），`out.fire` 时 `last_grant ← chosen`；ready 同样不门控自身 valid（两遍结构，见 RRArbRef_n4 对拍实证）；last_grant 初值 0（chisel 为 RegEnable 无复位，按 Verilator 两态语义取 0）。
