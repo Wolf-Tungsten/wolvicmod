@@ -23,3 +23,4 @@
 
 #include "wolvicmod/dbg/trace.h"
 #include "wolvicmod/dbg/audit.h"
+#include "wolvicmod/dbg/probe.h"
