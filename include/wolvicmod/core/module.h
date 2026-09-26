@@ -31,6 +31,25 @@ inline std::vector<Module*>& ctxStack() {
 }
 }  // namespace detail
 
+// Array of child-module handles (§6.1): wraps the pointer array (C++ has no
+// arrays of references) and hands out references via operator[], so call sites
+// read cms[i].port just like single-child reference members. The children are
+// owned by the parent's children list, exactly as with createChildModule.
+template <class T, size_t N>
+class ChildModuleArray {
+public:
+    explicit ChildModuleArray(std::array<T*, N> ptrs) : ptrs_(ptrs) {}
+
+    T& operator[](size_t i) { return *ptrs_[i]; }
+    const T& operator[](size_t i) const { return *ptrs_[i]; }
+    constexpr size_t size() const { return N; }
+
+    const std::array<T*, N>& ptrs() const { return ptrs_; }  // interop escape hatch
+
+private:
+    std::array<T*, N> ptrs_;
+};
+
 // Tree node of the hierarchy (§2.2): holds signals, state, actions and child
 // modules. Modeling happens entirely in the constructor (§4.1). Modules are
 // non-copyable (§6.1).
@@ -68,18 +87,18 @@ public:
     }
 
     // Batch creation: N default-constructed children named "name[0]" .. "name[N-1]",
-    // returned as a pointer array (C++ has no arrays of references). The array is
-    // only a wiring handle for the constructor body — child handles are never
+    // returned as a ChildModuleArray (operator[] hands out references). The array
+    // is only a wiring handle for the constructor body — child handles are never
     // needed afterwards (§4.1), so prefer a constructor-local; bind it to a member
-    // only when post-construction access is genuinely needed (e.g. testbench state
-    // dumps reaching into child internals).
+    // (MOD_ARRAY) only when post-construction access is genuinely needed (e.g.
+    // testbench state dumps reaching into child internals).
     template <class T, size_t N>
-    std::array<T*, N> createChildModuleArray(std::string_view name) {
+    ChildModuleArray<T, N> createChildModuleArray(std::string_view name) {
         static_assert(N > 0, "createChildModuleArray: empty array");
-        std::array<T*, N> arr{};
+        std::array<T*, N> ptrs{};
         for (size_t i = 0; i < N; ++i)
-            arr[i] = &createChildModule<T>(std::string(name) + "[" + std::to_string(i) + "]");
-        return arr;
+            ptrs[i] = &createChildModule<T>(std::string(name) + "[" + std::to_string(i) + "]");
+        return ChildModuleArray<T, N>(ptrs);
     }
 
     const std::string& name() const { return name_; }
@@ -179,9 +198,11 @@ void In<T>::set(const T& v) {
 
 // One-line member declarations (§6.1). When T contains commas (e.g.
 // std::array<T, N>), alias it first.
-#define IN(T, name)     ::wolvicmod::In<T>&      name = createIn<T>(#name)
-#define OUT(T, name)    ::wolvicmod::Out<T>&     name = createOut<T>(#name)
-#define WIRE(T, name)   ::wolvicmod::Wire<T>&    name = createWire<T>(#name)
-#define REG(T, name)    ::wolvicmod::Reg<T>&     name = createReg<T>(#name)
-#define MEM(T, R, name) ::wolvicmod::Mem<T, R>&  name = createMem<T, R>(#name)
-#define SUB(T, name)    T&                       name = createChildModule<T>(#name)
+#define IN(T, name)           ::wolvicmod::In<T>&      name = createIn<T>(#name)
+#define OUT(T, name)          ::wolvicmod::Out<T>&     name = createOut<T>(#name)
+#define WIRE(T, name)         ::wolvicmod::Wire<T>&    name = createWire<T>(#name)
+#define REG(T, name)          ::wolvicmod::Reg<T>&     name = createReg<T>(#name)
+#define MEM(T, R, name)       ::wolvicmod::Mem<T, R>&  name = createMem<T, R>(#name)
+#define MOD(T, name)          T&                       name = createChildModule<T>(#name)
+#define MOD_ARRAY(T, N, name) ::wolvicmod::ChildModuleArray<T, N> name = \
+    createChildModuleArray<T, N>(#name)

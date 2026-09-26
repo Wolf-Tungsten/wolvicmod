@@ -199,8 +199,8 @@ TEST_CASE("M3: hierarchy flattens transparently (§4.2)") {
         IN(uint32_t, din);
         IN(bool, clk);
         OUT(uint32_t, dout);
-        SUB(Child, c0);
-        SUB(Child, c1);
+        MOD(Child, c0);
+        MOD(Child, c1);
         Top() {
             c0.din = din;
             c0.clk = clk;

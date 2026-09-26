@@ -73,7 +73,7 @@ struct Parent : Module {
     IN(uint32_t, din);
     IN(bool, clk);
     OUT(uint32_t, dout);
-    SUB(Child, sr);
+    MOD(Child, sr);
 
     Parent() {
         sr.din = din;   // down: parent Assign drives child In
@@ -130,7 +130,7 @@ TEST_CASE("M2: hierarchy wiring registers in the parent's context") {
 TEST_CASE("M2: parent cannot read a child's internal wire") {
     struct Bad : Module {
         OUT(uint32_t, o);
-        SUB(Child, c);
+        MOD(Child, c);
         Bad() {
             o.assign().reads(c.internal) = [](auto src) {
                 auto [w] = src;
@@ -151,12 +151,12 @@ TEST_CASE("M2: a module cannot drive its own In") {
 
 TEST_CASE("M2: a module cannot drive a grandchild's In") {
     struct Mid : Module {
-        SUB(Child, c);
+        MOD(Child, c);
         Mid() = default;
     };
     struct Bad : Module {
         OUT(uint32_t, o);
-        SUB(Mid, m);
+        MOD(Mid, m);
         Bad() { m.c.din = 1u; }  // grandchild port: illegal
     };
     CHECK_THROWS_AS(Bad{}, Error);
@@ -165,7 +165,7 @@ TEST_CASE("M2: a module cannot drive a grandchild's In") {
 TEST_CASE("M2: parent cannot update a child's Reg") {
     struct Bad : Module {
         IN(bool, clk);
-        SUB(Child, c);
+        MOD(Child, c);
         Bad() {
             c.q.update().on(posedge(clk)).reads(c.dout) = [](auto src) {
                 auto [d] = src;

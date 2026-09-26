@@ -39,15 +39,15 @@ void combine(Signal<std::array<V, N>>& dst, const std::array<E*, N>& srcs) {
         srcs);
 }
 
-// collectPorts：N 个同类型子模块的同名端口合并（combine 的复合便捷）。
-// get 为访问子（Cm& -> Out<V>&），调用点以 lambda 给出且必须带尾置返回类
-// 型——端口是引用成员，省略 -> Out<V>& 会按值返回并拷贝实体（Entity 不可
-// 拷贝，编译失败）。
-template <class V, size_t N, class CmArr, class Get>
-void collectPorts(Signal<std::array<V, N>>& dst, CmArr& cms, Get get) {
-    using E = std::remove_reference_t<decltype(get(*cms[0]))>;
+// collectPorts：子模块数组（ChildModuleArray）的同名端口合并（combine 的复合
+// 便捷）。get 为访问子（Cm& -> Out<V>&），调用点以 lambda 给出且必须带尾置返
+// 回类型——端口是引用成员，省略 -> Out<V>& 会按值返回并拷贝实体（Entity 不
+// 可拷贝，编译失败）。
+template <class V, class Cm, size_t N, class Get>
+void collectPorts(Signal<std::array<V, N>>& dst, ChildModuleArray<Cm, N>& cms, Get get) {
+    using E = std::remove_reference_t<decltype(get(cms[0]))>;
     std::array<E*, N> srcs{};
-    for (size_t i = 0; i < N; ++i) srcs[i] = &get(*cms[i]);
+    for (size_t i = 0; i < N; ++i) srcs[i] = &get(cms[i]);
     combine(dst, srcs);
 }
 

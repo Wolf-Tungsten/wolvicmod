@@ -95,7 +95,7 @@ int main() {
 |---|---|
 | `adder.cpp` | 组合逻辑：Assign 完整形式与快速路径 |
 | `counter.cpp` | 时序逻辑：Update、边沿、守卫、优先级；根模块驱动流程 |
-| `sort_pipeline.cpp` | 层次与参数化：模板子模块、SUB、连线三模式、STL 容器状态 |
+| `sort_pipeline.cpp` | 层次与参数化：模板子模块、MOD、连线三模式、STL 容器状态 |
 | `data_mem.cpp` | 存储器：Mem 写口 `.addr`、行级提交、组合读口 |
 
 ---
@@ -115,7 +115,8 @@ int main() {
 | `Wire<T>& createWire<T>(name)` | `WIRE(T, name)` | 组合信号 |
 | `Reg<T>& createReg<T>(name)` | `REG(T, name)` | 寄存器 |
 | `Mem<T, R>& createMem<T, R>(name)` | `MEM(T, R, name)` | 存储器（R 行 T） |
-| `T& createChildModule<T>(name)` | `SUB(T, name)` | 子模块 |
+| `T& createChildModule<T>(name)` | `MOD(T, name)` | 子模块 |
+| `ChildModuleArray<T, N> createChildModuleArray<T, N>(name)` | `MOD_ARRAY(T, N, name)` | 子模块数组 |
 
 类型参数含逗号时（如 `std::array<T, N>`），先取别名再进宏：
 
@@ -187,16 +188,18 @@ rdata.assign().reads(mem, raddr) = [](auto src) {          // 读口：组合读
 
 ### 3.5 层次
 
-子模块经 `SUB(T, name)` 创建，连线限定三种模式（父模块只能读写**直接**子模块的端口）：
+子模块经 `MOD(T, name)` 创建，连线限定三种模式（父模块只能读写**直接**子模块的端口）：
 
 ```cpp
-SUB(ShiftReg<Vec, 3>, sr);
+MOD(ShiftReg<Vec, 3>, sr);
 
 sr.din = sorted;   // 下行：父模块 Assign 驱动子模块 In
 sr.clk = clk;      // 时钟分发同理
 dout = sr.dout;    // 上行：父模块读子模块 Out
 // 兄弟连线 = 读一个子模块的 Out + 驱动另一个的 In，无需专门设施
 ```
+
+子模块数组经 `MOD_ARRAY(T, N, name)` 创建（自动起名 `name[0]`..`name[N-1]`），返回 `ChildModuleArray<T, N>`——`operator[]` 返回引用，`cms[i].port` 写法与单个子模块一致。数组只是构造函数体内的连线句柄：默认写构造函数局部（`auto cms = createChildModuleArray<T, N>("cm");`），确有构造后访问需求（如 testbench dump 子模块内部态）才用 `MOD_ARRAY` 绑为成员。
 
 跨级访问、读子模块内部信号、驱动自己的 `In`、用 Assign 驱动 `Reg/Mem`，均在注册时报错。
 
@@ -336,7 +339,8 @@ XiangShan 生态元件（FastQueue / VipArb / QoS 仲裁 / Alloc / SRAM 模板�
 |---|---|---|---|
 | `IN(T, n)` | 输入端口 | `REG(T, n)` | 寄存器 |
 | `OUT(T, n)` | 输出端口 | `MEM(T, R, n)` | 存储器（R 行 T） |
-| `WIRE(T, n)` | 组合信号 | `SUB(T, n)` | 子模块 |
+| `WIRE(T, n)` | 组合信号 | `MOD(T, n)` | 子模块 |
+| `MOD_ARRAY(T, N, n)` | 子模块数组 | | |
 
 ### 注册链词序（编译期强制）
 

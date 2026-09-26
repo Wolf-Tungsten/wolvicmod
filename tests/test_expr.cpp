@@ -131,7 +131,7 @@ TEST_CASE("M5: expression through hierarchy wiring") {
     struct Top : Module {
         IN(uint32_t, a);
         OUT(uint32_t, o);
-        SUB(Child, c);
+        MOD(Child, c);
         Top() {
             c.x = a + 1;
             o = c.y + a;

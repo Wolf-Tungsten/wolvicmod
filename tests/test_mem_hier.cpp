@@ -133,7 +133,7 @@ struct SortPipeline : Module {
     IN(bool, clk);
     OUT(Vec, dout);
     REG(Vec, sorted);
-    SUB(SR, sr);
+    MOD(SR, sr);
 
     SortPipeline() {
         sorted.update().on(posedge(clk)).reads(din) = [](auto src) {
@@ -180,8 +180,8 @@ TEST_CASE("M6: sibling wiring forms a datapath (§3.3)") {
         IN(uint32_t, din);
         IN(bool, clk);
         OUT(uint32_t, dout);
-        SUB(Stage, s0);
-        SUB(Stage, s1);
+        MOD(Stage, s0);
+        MOD(Stage, s1);
         Top() {
             s0.din = din;
             s0.clk = clk;

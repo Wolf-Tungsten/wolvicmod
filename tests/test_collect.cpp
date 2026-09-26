@@ -74,10 +74,10 @@ struct GrandChild : Module {
     GrandChild() { dout = 7; }
 };
 struct Mid : Module {
-    SUB(GrandChild, gc);
+    MOD(GrandChild, gc);
 };
 struct BadTop : Module {
-    SUB(Mid, mid);
+    MOD(Mid, mid);
     WIRE(U32x1, lanes);
     BadTop() {
         std::array<Out<uint32_t>*, 1> outs{&mid.gc.dout};
