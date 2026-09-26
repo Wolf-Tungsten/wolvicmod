@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <ostream>
@@ -64,6 +65,21 @@ public:
         ref.name_ = name;
         children_.push_back(std::move(child));
         return ref;
+    }
+
+    // Batch creation: N default-constructed children named "name[0]" .. "name[N-1]",
+    // returned as a pointer array (C++ has no arrays of references). The array is
+    // only a wiring handle for the constructor body — child handles are never
+    // needed afterwards (§4.1), so prefer a constructor-local; bind it to a member
+    // only when post-construction access is genuinely needed (e.g. testbench state
+    // dumps reaching into child internals).
+    template <class T, size_t N>
+    std::array<T*, N> createChildModuleArray(std::string_view name) {
+        static_assert(N > 0, "createChildModuleArray: empty array");
+        std::array<T*, N> arr{};
+        for (size_t i = 0; i < N; ++i)
+            arr[i] = &createChildModule<T>(std::string(name) + "[" + std::to_string(i) + "]");
+        return arr;
     }
 
     const std::string& name() const { return name_; }
