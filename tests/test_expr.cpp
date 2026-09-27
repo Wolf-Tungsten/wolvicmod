@@ -159,4 +159,58 @@ TEST_CASE("M5: expression result converts to the target type") {
     CHECK(top.eq.get() == true);
 }
 
+TEST_CASE("M5: subscript expression on array-valued signals") {
+    struct M : Module {
+        using U32x4 = std::array<uint32_t, 4>;
+        IN(U32x4, arr);
+        OUT(uint32_t, y);
+        OUT(uint32_t, z);
+        M() {
+            y = arr[1];
+            z = arr[0] + arr[2];  // 下标节点可继续组合
+        }
+    };
+    M top;
+    CHECK(top.actions()[0]->reads().size() == 1);  // 读集 = 整个 arr 端口
+    CHECK(top.actions()[1]->reads().size() == 1);  // arr[0]+arr[2] 去重后仍 1
+    top.elaborate();
+    top.arr.set({10, 20, 30, 40});
+    top.eval();
+    CHECK(top.y.get() == 20);
+    CHECK(top.z.get() == 40);
+    // 活性：改元素即传播（非快照）
+    top.arr.set({1, 2, 3, 4});
+    top.eval();
+    CHECK(top.y.get() == 2);
+    CHECK(top.z.get() == 4);
+}
+
+TEST_CASE("M5: subscript expression in update and bool arrays") {
+    struct M : Module {
+        using Boolx2 = std::array<bool, 2>;
+        using U8x3 = std::array<uint8_t, 3>;
+        IN(bool, clk);
+        IN(Boolx2, rdy);
+        IN(U8x3, nib);
+        OUT(bool, o);
+        REG(uint8_t, cnt);
+        M() {
+            o = rdy[1];
+            cnt.update().on(posedge(clk)) = cnt + nib[2];
+        }
+    };
+    M top;
+    top.elaborate();
+    top.rdy.set({false, true});
+    top.nib.set({1, 2, 3});
+    top.clk.set(0);
+    top.eval();
+    CHECK(top.o.get() == true);
+    CHECK(top.cnt.get() == 0);
+    top.clk.set(1);
+    top.eval();
+    top.clk.set(0);
+    CHECK(top.cnt.get() == 3);
+}
+
 }  // namespace

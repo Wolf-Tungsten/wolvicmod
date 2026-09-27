@@ -33,11 +33,20 @@ template <class Op, class X>
 struct Un {
     X x;
 };
+// Subscript node: x[i]（数组值信号的下标；索引目前为编译期值，
+// 以 Const 包装——未来放开信号索引只需让 i 承载任意操作数）。
+template <class X, class I>
+struct Idx {
+    X x;
+    I i;
+};
 
 template <class Op, class L, class R>
 struct IsExpr<Bin<Op, L, R>> : std::true_type {};
 template <class Op, class X>
 struct IsExpr<Un<Op, X>> : std::true_type {};
+template <class X, class I>
+struct IsExpr<Idx<X, I>> : std::true_type {};
 
 template <class E>
 concept ValueReadable = Readable<E> && !IsMem<E>::value;
@@ -71,6 +80,8 @@ template <class Op, class L, class R>
 decltype(auto) evalNode(const Bin<Op, L, R>& n) { return Op{}(evalNode(n.l), evalNode(n.r)); }
 template <class Op, class X>
 decltype(auto) evalNode(const Un<Op, X>& n) { return Op{}(evalNode(n.x)); }
+template <class X, class I>
+decltype(auto) evalNode(const Idx<X, I>& n) { return evalNode(n.x)[evalNode(n.i)]; }
 
 // ---- read-set collection ----
 template <class E>
@@ -84,6 +95,11 @@ void collectLeaves(const Bin<Op, L, R>& n, std::vector<Entity*>& out) {
 }
 template <class Op, class X>
 void collectLeaves(const Un<Op, X>& n, std::vector<Entity*>& out) { collectLeaves(n.x, out); }
+template <class X, class I>
+void collectLeaves(const Idx<X, I>& n, std::vector<Entity*>& out) {
+    collectLeaves(n.x, out);
+    collectLeaves(n.i, out);
+}
 
 inline void dedupeReads(std::vector<Entity*>& v) {
     std::sort(v.begin(), v.end());
@@ -154,6 +170,15 @@ WOLVICMOD_DEFINE_UNOP(~, std::bit_not<>)
 WOLVICMOD_DEFINE_UNOP(!, std::logical_not<>)
 
 #undef WOLVICMOD_DEFINE_UNOP
+
+// ---- Signal::operator[]（数组值信号的下标表达式节点） ----
+template <class T>
+auto Signal<T>::operator[](size_t i)
+    requires requires(const T& t, size_t n) { t[n]; }
+{
+    return detail::Idx<detail::Leaf<Signal<T>>, detail::Const<size_t>>{
+        detail::Leaf<Signal<T>>{this}, detail::Const<size_t>{i}};
+}
 
 }  // namespace wolvicmod
 

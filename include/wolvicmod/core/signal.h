@@ -30,6 +30,12 @@ public:
     template <class Src>
     void operator=(Src&& src);
 
+    // Subscript expression for array-valued signals (§3.1): returns an
+    // expression node (not a value) — only usable in assign/update registration.
+    // Defined in core/expr.h.
+    auto operator[](size_t i)
+        requires requires(const T& t, size_t n) { t[n]; };
+
     // Full-form Assign registration: target.assign().reads(...) = lambda.
     // Defined in core/action.h.
     template <int Dummy = 0>
