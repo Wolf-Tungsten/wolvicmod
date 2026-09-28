@@ -55,9 +55,18 @@ inline void Module::elaborate(std::string_view topName) {
         a->bindReadIdx(off, static_cast<uint32_t>(sim->readIdxPool.size()) - off);
     }
 
-    // Debug escape hatch: WOLVICMOD_DIRTY_EVAL=0 forces full re-evaluation.
-    if (const char* e = std::getenv("WOLVICMOD_DIRTY_EVAL"))
-        sim->dirtyEval = e[0] != '0';
+    // Scheduling-mode escape hatch: WOLVICMOD_DIRTY_EVAL=0 forces full
+    // re-evaluation; =poll selects the legacy dirty-generation scan (A/B).
+    if (const char* e = std::getenv("WOLVICMOD_DIRTY_EVAL")) {
+        if (e[0] == '0')
+            sim->schedMode = detail::SchedMode::Full;
+        else if (std::string_view(e) == "poll")
+            sim->schedMode = detail::SchedMode::Poll;
+    }
+
+    // First eval() runs everything (the push-path equivalent of poll mode's
+    // never-run rule, lastRunGen == 0).
+    for (uint32_t pos = 0; pos < sim->execOrder.size(); ++pos) sim->readyQ.push(pos);
 
     sim_ = std::move(sim);
 

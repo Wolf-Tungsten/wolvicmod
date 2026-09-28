@@ -6,6 +6,8 @@
 #include <string_view>
 #include <vector>
 
+#include "wolvicmod/core/readyq.h"
+
 namespace wolvicmod {
 
 class Module;
@@ -88,17 +90,32 @@ public:
     void attach(Module* owner, std::string_view name);  // defined in module.h
     void setFlatIndex(uint32_t i) { flatIndex_ = i; }
 
-    // Dirty-driven scheduling (§5.2): dirtyGen records the dirty clock value
-    // of the last value change; the engine skips an action while none of its
-    // reads changed after its previous run. Slots are bound at elaboration
-    // into SimState's flat arrays; before elaboration marks are no-ops.
+    // Dirty-driven scheduling (§5.2 fast path): dirtyGen records the dirty
+    // clock value of the last value change (legacy poll path); the push path
+    // notifies dependent actions through the reverse dependency map.
+    // Slots are bound at elaboration into SimState's flat arrays; before
+    // elaboration marks are no-ops.
     uint64_t dirtyGen() const { return (dirtySlot_ != nullptr) ? *dirtySlot_ : 1; }
     void markDirty() {
-        if (dirtySlot_ != nullptr) *dirtySlot_ = ++(*dirtyClock_);
+        if (dirtySlot_ != nullptr) {
+            *dirtySlot_ = ++(*dirtyClock_);
+            // Push notification happens in every scheduling mode: pushes are
+            // deduped and a superset drain is harmless (actions are pure
+            // functions of their reads), so switching modes mid-run never
+            // needs a queue reset.
+            if (depN_ != 0) readyQ_->pushDeps(deps_, depN_);
+        }
     }
     void bindDirty(uint64_t* slot, uint64_t* clock) {
         dirtySlot_ = slot;
         dirtyClock_ = clock;
+    }
+    // Reverse dependency map row (CSR into SimState::depPool) + the queue to
+    // notify. Bound at elaboration together with bindDirty.
+    void bindDeps(const uint32_t* deps, uint32_t n, detail::ReadyQueue* q) {
+        deps_ = deps;
+        depN_ = n;
+        readyQ_ = q;
     }
 
 protected:
@@ -111,6 +128,9 @@ private:
     uint32_t flatIndex_ = 0;
     uint64_t* dirtySlot_ = nullptr;
     uint64_t* dirtyClock_ = nullptr;
+    const uint32_t* deps_ = nullptr;      // CSR row into SimState::depPool
+    uint32_t depN_ = 0;
+    detail::ReadyQueue* readyQ_ = nullptr;
 };
 
 }  // namespace wolvicmod

@@ -54,47 +54,74 @@ inline void runSccGroup(SimState::SccGroup& g, size_t cap, bool audit) {
 // intents per priority chain with all writes taking effect together (NBA).
 // Loops until a round commits nothing; eval() is idempotent (§5.1).
 //
-// Fast path (dirty-driven): an action runs only when one of its reads changed
-// since its previous run; unchanged values do not propagate (change detection
-// at Assign stores, Reg commits, Mem row writes and external input drives).
-// The fixpoint reached is identical to full re-evaluation: a skipped action
-// is a pure function of reads that have not changed, so its output and side
-// effects (edge history, intent flag) are unchanged as well. Trace mode
-// forces full evaluation so every action's trace state stays current.
+// Fast path (dirty-driven), two selectable engines plus a full fallback
+// (SimState::SchedMode):
+// - Push (default): value changes push dependent items into the level-bucketed
+//   ready queue; phase 1 drains it in ascending level order (= topological
+//   order). Quiescent cones cost nothing, and a variable read by N actions
+//   is change-detected once at the write site instead of being polled N times.
+// - Poll: an action runs only when one of its reads changed (dirtyGen >
+//   lastRunGen) since its previous run.
+// - Full: everything runs every round.
+// All three reach the same fixpoint: a skipped action is a pure function of
+// reads that have not changed, so its output and side effects (edge history,
+// intent flag) are unchanged as well. Trace mode forces Full so every
+// action's trace state stays current.
 inline void Module::eval() {
     if (sim_ == nullptr) detail::fail("eval(): call elaborate() first ('" + hierPath() + "')");
     auto& sim = *sim_;
-    const bool skipQuiescent = sim.dirtyEval && sim.trace == nullptr;
+    const detail::SchedMode mode =
+        (sim.trace != nullptr) ? detail::SchedMode::Full : sim.schedMode;
 
     std::vector<const Entity*> committed;
     for (size_t round = 0;; ++round) {
         if (sim.trace != nullptr) sim.trace->onRound(sim.evalCount, round);
 
         // Phase 1: combinational evaluation.
-        for (auto& item : sim.execOrder) {
-            if (item.single != nullptr) {
-                Action* a = item.single;
-                if (skipQuiescent && !detail::actionDirty(sim, a)) continue;
-                if (sim.auditReads)
-                    detail::auditRun(a);
-                else
-                    a->run();
-                a->markRan(sim.clock);
-            } else {
-                auto& g = *sim.groups[item.group];
-                if (skipQuiescent) {
-                    bool anyDirty = false;
-                    for (Action* a : g.actions)
-                        if (detail::actionDirty(sim, a)) {
-                            anyDirty = true;
-                            break;
-                        }
-                    if (!anyDirty) continue;
+        if (mode == detail::SchedMode::Push) {
+            sim.readyQ.drain([&](uint32_t pos) {
+                const auto& item = sim.execOrder[pos];
+                if (item.single != nullptr) {
+                    Action* a = item.single;
+                    if (sim.auditReads)
+                        detail::auditRun(a);
+                    else
+                        a->run();
+                    a->markRan(sim.clock);
+                } else {
+                    auto& g = *sim.groups[item.group];
+                    detail::runSccGroup(g, sim.sccIterCap, sim.auditReads);
+                    for (Action* a : g.actions) a->markRan(sim.clock);
+                    // No extra dirty marking needed: AssignAction::run()
+                    // already dirties every member signal whose value
+                    // actually changed.
                 }
-                detail::runSccGroup(g, sim.sccIterCap, sim.auditReads);
-                for (Action* a : g.actions) a->markRan(sim.clock);
-                // No extra dirty marking needed: AssignAction::run() already
-                // dirties every member signal whose value actually changed.
+            });
+        } else {
+            const bool skipQuiescent = mode == detail::SchedMode::Poll;
+            for (auto& item : sim.execOrder) {
+                if (item.single != nullptr) {
+                    Action* a = item.single;
+                    if (skipQuiescent && !detail::actionDirty(sim, a)) continue;
+                    if (sim.auditReads)
+                        detail::auditRun(a);
+                    else
+                        a->run();
+                    a->markRan(sim.clock);
+                } else {
+                    auto& g = *sim.groups[item.group];
+                    if (skipQuiescent) {
+                        bool anyDirty = false;
+                        for (Action* a : g.actions)
+                            if (detail::actionDirty(sim, a)) {
+                                anyDirty = true;
+                                break;
+                            }
+                        if (!anyDirty) continue;
+                    }
+                    detail::runSccGroup(g, sim.sccIterCap, sim.auditReads);
+                    for (Action* a : g.actions) a->markRan(sim.clock);
+                }
             }
         }
 
@@ -142,15 +169,17 @@ inline void Module::eval() {
     }
 }
 
-// §5.2: dirty-driven scheduling on (default) / off (full re-evaluation).
+// §5.2: dirty-driven scheduling on (push dispatch, the default) / off
+// (classic full re-evaluation). WOLVICMOD_DIRTY_EVAL=poll selects the legacy
+// dirty-generation scan instead.
 inline void Module::dirtyEvalOn() {
     if (sim_ == nullptr) detail::fail("dirtyEvalOn(): call elaborate() first ('" + hierPath() + "')");
-    sim_->dirtyEval = true;
+    sim_->schedMode = detail::SchedMode::Push;
 }
 
 inline void Module::dirtyEvalOff() {
     if (sim_ == nullptr) detail::fail("dirtyEvalOff(): call elaborate() first ('" + hierPath() + "')");
-    sim_->dirtyEval = false;
+    sim_->schedMode = detail::SchedMode::Full;
 }
 
 }  // namespace wolvicmod

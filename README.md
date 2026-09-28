@@ -248,13 +248,16 @@ top.assertUpdateMutexOff();   // （默认关：注册序优先级静默生效�
 
 top.dirtyEvalOff();           // 关脏驱动跳过（§5.4），回退逐动作全量求值
 top.dirtyEvalOn();            // （默认开；elaborate 前可用环境变量
-                              //  WOLVICMOD_DIRTY_EVAL=0 关掉）
+                              //  WOLVICMOD_DIRTY_EVAL=0 关掉，
+                              //  WOLVICMOD_DIRTY_EVAL=poll 选旧轮询路径）
 ```
 
-脏驱动跳过（§5.4）默认开启：读集没有变化的动作整片跳过，语义与全量求值
-一致，但对**读集完备性**是硬要求——lambda 偷读未声明实体在全量求值下无害、
-在脏驱动下会产生过期值。建议模型在 `WOLVICMOD_AUDIT` 构建下跑一遍
-`auditOn()` 确认无偷读后再依赖脏驱动性能。
+脏驱动跳过（§5.4）默认开启，默认走**推送派发**：值变化在写入点检测一次，
+沿反向依赖表把依赖动作推入按拓扑层级分桶的就绪队列，静止逻辑锥零成本；
+`WOLVICMOD_DIRTY_EVAL=poll` 可切回逐动作轮询代际的旧路径作 A/B 对照。
+语义与全量求值一致，但对**读集完备性**是硬要求——lambda 偷读未声明实体在
+全量求值下无害、在脏驱动下会产生过期值。建议模型在 `WOLVICMOD_AUDIT` 构建下
+跑一遍 `auditOn()` 确认无偷读后再依赖脏驱动性能。
 
 ### 3.9 编码约定：同名解包
 

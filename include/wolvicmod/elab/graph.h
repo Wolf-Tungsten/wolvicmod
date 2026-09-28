@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "wolvicmod/core/action.h"
+#include "wolvicmod/core/readyq.h"
 #include "wolvicmod/elab/flatten.h"
 #include "wolvicmod/sim/errors.h"
 
@@ -36,6 +37,12 @@ public:
 };
 
 // Everything the simulation engine needs (§4.3).
+// Dirty-driven scheduling engine selection (§5.2): Push (default) notifies
+// dependents through the reverse dependency map; Poll is the legacy
+// dirty-generation scan (kept for A/B); Full re-evaluates everything
+// (trace mode forces it).
+enum class SchedMode : uint8_t { Full, Poll, Push };
+
 struct SimState {
     // A non-trivial strongly connected component of the combinational
     // evaluation graph: iterated to a steady state at run time.
@@ -62,15 +69,19 @@ struct SimState {
     size_t sccIterCap = 100;    // steady-state iteration limit (§4.3)
     size_t roundCap = 10000;    // zero-delay oscillation limit (§5.3)
 
-    // Dirty-driven scheduling (§5.2 fast path): clock ticks on every value
-    // change (markDirty); dirtyGens[e] is the clock value of entity e's last
-    // change; readIdxPool concatenates every action's read flat indices
-    // (Action::readIdxOff/readIdxN). An action runs only when one of its reads
-    // has dirtyGen > action.lastRunGen — quiescent cones are skipped entirely.
+    // Dirty-driven scheduling (§5.2 fast path). See SchedMode above.
+    //
+    // Poll-path state: clock ticks on every value change (markDirty);
+    // dirtyGens[e] is the clock value of entity e's last change; readIdxPool
+    // concatenates every action's read flat indices
+    // (Action::readIdxOff/readIdxN).
+    SchedMode schedMode = SchedMode::Push;
     uint64_t clock = 1;
-    std::vector<uint64_t> dirtyGens;   // per entity by flatIndex, init 1
+    std::vector<uint64_t> dirtyGens;    // per entity by flatIndex, init 1
     std::vector<uint32_t> readIdxPool;  // per-action read flat indices
-    bool dirtyEval = true;              // off -> classic full re-evaluation
+    ReadyQueue readyQ;
+    std::vector<uint32_t> depPool;      // dependent exec positions, CSR
+    std::vector<uint32_t> depOff;       // per entity flat index, size E+1
 
     std::unique_ptr<WaveDumperBase> wave;  // waveform sink (§6.3)
     std::unique_ptr<TraceSinkBase> trace;  // round-level trace sink (§6.3)
@@ -224,6 +235,66 @@ inline void buildExecOrder(const FlatModel& flat, SimState& sim) {
         sim.execOrder.push_back({nullptr, sim.groups.size()});
         sim.groups.push_back(std::move(group));
     }
+
+    // ---- push-dispatch wiring (§5.2 fast path) ----
+    // Topological level per exec item (longest path from sources, along the
+    // condensation DAG): producers always sit at a lower level than their
+    // consumers, so draining a level-bucketed queue ascending preserves the
+    // topological execution order. execOrder positions are already a
+    // topological order, so levels compute in a single forward pass.
+    const uint32_t nItems = static_cast<uint32_t>(sim.execOrder.size());
+    const auto forEachRead = [&](const SimState::ExecItem& item, auto&& f) {
+        if (item.single != nullptr) {
+            for (const Entity* r : item.single->reads()) f(r);
+        } else {
+            for (const Action* a : sim.groups[item.group]->actions)
+                for (const Entity* r : a->reads()) f(r);
+        }
+    };
+    // entity flat index -> producer exec position (Assign drivers only;
+    // UINT32_MAX for sources: root inputs, Reg/Mem, constants).
+    std::vector<uint32_t> producerOf(E, UINT32_MAX);
+    for (uint32_t pos = 0; pos < nItems; ++pos) {
+        const auto& item = sim.execOrder[pos];
+        if (item.single != nullptr) {
+            if (item.single->kind() == Action::Kind::Assign)
+                producerOf[item.single->target()->flatIndex()] = pos;
+        } else {
+            for (const Action* a : sim.groups[item.group]->actions)
+                if (a->kind() == Action::Kind::Assign)
+                    producerOf[a->target()->flatIndex()] = pos;
+        }
+    }
+    std::vector<uint32_t> levels(nItems, 0);
+    for (uint32_t pos = 0; pos < nItems; ++pos) {
+        uint32_t l = 0;
+        forEachRead(sim.execOrder[pos], [&](const Entity* r) {
+            const uint32_t p = producerOf[r->flatIndex()];
+            if (p != UINT32_MAX && p != pos) l = std::max(l, levels[p] + 1);
+        });
+        levels[pos] = l;
+    }
+    // Reverse dependency map (CSR): entity -> exec positions reading it.
+    // Reverse dependency map (CSR): entity -> exec positions reading it.
+    // Self-notification is excluded: an item never needs to be woken by its
+    // own output — for an SCC group these are the internal cycle edges,
+    // whose propagation runSccGroup already handles by internal iteration.
+    sim.depOff.assign(E + 1, 0);
+    for (uint32_t pos = 0; pos < nItems; ++pos)
+        forEachRead(sim.execOrder[pos], [&](const Entity* r) {
+            if (producerOf[r->flatIndex()] != pos) ++sim.depOff[r->flatIndex() + 1];
+        });
+    for (uint32_t i = 0; i < E; ++i) sim.depOff[i + 1] += sim.depOff[i];
+    sim.depPool.resize(sim.depOff[E]);
+    std::vector<uint32_t> cursor(sim.depOff.begin(), sim.depOff.end() - 1);
+    for (uint32_t pos = 0; pos < nItems; ++pos)
+        forEachRead(sim.execOrder[pos], [&](const Entity* r) {
+            if (producerOf[r->flatIndex()] != pos) sim.depPool[cursor[r->flatIndex()]++] = pos;
+        });
+    for (uint32_t i = 0; i < E; ++i)
+        flat.entities[i]->bindDeps(sim.depPool.data() + sim.depOff[i],
+                                   sim.depOff[i + 1] - sim.depOff[i], &sim.readyQ);
+    sim.readyQ.init(std::move(levels));
 }
 
 // Group Updates by target state in registration order (§4.3).

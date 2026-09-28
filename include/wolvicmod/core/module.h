@@ -136,8 +136,8 @@ public:
     void assertUpdateMutexOff();
 
     // Dirty-driven scheduling switch (§5.2), defined in sim/engine.h.
-    // Default on; dirtyEvalOff() falls back to classic full re-evaluation
-    // (every action runs every round) for A/B debugging.
+    // Default on (push dispatch); dirtyEvalOff() falls back to classic full
+    // re-evaluation (every action runs every round) for A/B debugging.
     void dirtyEvalOn();
     void dirtyEvalOff();
 
