@@ -18,20 +18,25 @@ concept BoolReadable =
 
 enum class EdgeKind : uint8_t { Posedge, Negedge };
 
+// The event-signal reader is a capture-less function pointer (no std::function
+// allocation, direct indirect call): the only state needed is the signal
+// itself, carried in sig.
 struct EdgeEvent {
     Entity* sig;
     EdgeKind kind;
-    std::function<bool()> read;  // current value of the event signal
+    bool (*read)(const Entity*);  // current value of the event signal
 };
 
 template <BoolReadable E>
 EdgeEvent posedge(E& s) {
-    return {&s, EdgeKind::Posedge, [&s] { return static_cast<bool>(s.readValue()); }};
+    return {&s, EdgeKind::Posedge,
+            [](const Entity* e) { return static_cast<bool>(static_cast<const E*>(e)->readValue()); }};
 }
 
 template <BoolReadable E>
 EdgeEvent negedge(E& s) {
-    return {&s, EdgeKind::Negedge, [&s] { return static_cast<bool>(s.readValue()); }};
+    return {&s, EdgeKind::Negedge,
+            [](const Entity* e) { return static_cast<bool>(static_cast<const E*>(e)->readValue()); }};
 }
 
 }  // namespace wolvicmod

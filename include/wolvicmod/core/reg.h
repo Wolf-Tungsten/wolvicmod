@@ -40,7 +40,15 @@ public:
 
     // --- internal ---
     T& nextSlot() { return next_; }
-    void commitNext() { cur_ = std::move(next_); }
+    void commitNext() {
+        // Change detection (§5.2 fast path): a commit that lands the current
+        // value dirties nothing, so downstream logic stays asleep.
+        if constexpr (kEqualityComparable<T>) {
+            if (cur_ == next_) return;
+        }
+        cur_ = std::move(next_);
+        markDirty();
+    }
 
 private:
     T cur_{};

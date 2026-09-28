@@ -62,6 +62,16 @@ struct SimState {
     size_t sccIterCap = 100;    // steady-state iteration limit (§4.3)
     size_t roundCap = 10000;    // zero-delay oscillation limit (§5.3)
 
+    // Dirty-driven scheduling (§5.2 fast path): clock ticks on every value
+    // change (markDirty); dirtyGens[e] is the clock value of entity e's last
+    // change; readIdxPool concatenates every action's read flat indices
+    // (Action::readIdxOff/readIdxN). An action runs only when one of its reads
+    // has dirtyGen > action.lastRunGen — quiescent cones are skipped entirely.
+    uint64_t clock = 1;
+    std::vector<uint64_t> dirtyGens;   // per entity by flatIndex, init 1
+    std::vector<uint32_t> readIdxPool;  // per-action read flat indices
+    bool dirtyEval = true;              // off -> classic full re-evaluation
+
     std::unique_ptr<WaveDumperBase> wave;  // waveform sink (§6.3)
     std::unique_ptr<TraceSinkBase> trace;  // round-level trace sink (§6.3)
     uint64_t evalCount = 0;                // eval() calls so far

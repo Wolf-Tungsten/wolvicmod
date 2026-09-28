@@ -39,7 +39,10 @@ public:
     auto update();
 
     // --- internal ---
-    void writeRow(size_t row, T&& v) { rows_[row] = std::move(v); }
+    void writeRow(size_t row, T&& v) {
+        rows_[row] = std::move(v);
+        markDirty();  // row granularity is not tracked: the whole Mem dirties
+    }
 
 private:
     std::array<T, R> rows_{};

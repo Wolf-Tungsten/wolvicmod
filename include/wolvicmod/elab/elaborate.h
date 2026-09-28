@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cstdlib>
 #include <memory>
 
 #include "wolvicmod/core/action.h"
@@ -41,6 +42,23 @@ inline void Module::elaborate(std::string_view topName) {
     auto sim = std::make_unique<detail::SimState>();
     detail::buildExecOrder(flat, *sim);
     detail::buildUpdateChains(flat, *sim);
+
+    // Bind dirty-driven scheduling state (§5.2 fast path): entity slots point
+    // into sim->dirtyGens (allocated once, never reallocated); each action's
+    // read flat indices concatenate into sim->readIdxPool.
+    sim->dirtyGens.assign(flat.entities.size(), 1);
+    for (uint32_t i = 0; i < flat.entities.size(); ++i)
+        flat.entities[i]->bindDirty(&sim->dirtyGens[i], &sim->clock);
+    for (Action* a : flat.actions) {
+        const uint32_t off = static_cast<uint32_t>(sim->readIdxPool.size());
+        for (const Entity* r : a->reads()) sim->readIdxPool.push_back(r->flatIndex());
+        a->bindReadIdx(off, static_cast<uint32_t>(sim->readIdxPool.size()) - off);
+    }
+
+    // Debug escape hatch: WOLVICMOD_DIRTY_EVAL=0 forces full re-evaluation.
+    if (const char* e = std::getenv("WOLVICMOD_DIRTY_EVAL"))
+        sim->dirtyEval = e[0] != '0';
+
     sim_ = std::move(sim);
 
     detail::ctxStack().clear();

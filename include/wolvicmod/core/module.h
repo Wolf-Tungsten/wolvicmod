@@ -135,6 +135,12 @@ public:
     void assertUpdateMutexOn();   // report simultaneously-active Updates
     void assertUpdateMutexOff();
 
+    // Dirty-driven scheduling switch (§5.2), defined in sim/engine.h.
+    // Default on; dirtyEvalOff() falls back to classic full re-evaluation
+    // (every action runs every round) for A/B debugging.
+    void dirtyEvalOn();
+    void dirtyEvalOff();
+
     // --- internal (framework use) ---
     const std::vector<std::unique_ptr<Entity>>& entities() const { return entities_; }
     const std::vector<std::unique_ptr<Module>>& children() const { return children_; }
@@ -191,7 +197,14 @@ void In<T>::set(const T& v) {
         detail::fail("set(): only root-module inputs are driven externally ('" + this->hierPath() + "')");
     if (!o->elaborated())
         detail::fail("set(): call elaborate() before driving inputs ('" + this->hierPath() + "')");
-    this->mutableValue() = v;
+    T& tv = this->mutableValue();
+    // Change detection (§5.2 fast path): re-driving the same value dirties
+    // nothing, so the next eval() skips the quiescent cone.
+    if constexpr (kEqualityComparable<T>) {
+        if (tv == v) return;
+    }
+    tv = v;
+    this->markDirty();
 }
 
 }  // namespace wolvicmod

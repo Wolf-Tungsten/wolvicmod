@@ -1,5 +1,6 @@
 #pragma once
 
+#include <concepts>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -38,6 +39,15 @@ inline void auditTouch(const Entity* e) {
 }  // namespace detail
 
 enum class EntityKind : uint8_t { In, Out, Wire, Reg, Mem };
+
+// Value types usable in dirty-change detection (§5.2): equality-comparable
+// values let the engine skip downstream recomputation when a write lands the
+// same value; non-comparable types conservatively always propagate.
+template <class T>
+inline constexpr bool kEqualityComparable =
+    requires(const T& a, const T& b) {
+        { a == b } -> std::convertible_to<bool>;
+    };
 
 // Base of all structural entities (§2.1). An entity is created and owned by a
 // Module via its createXXX methods; attaching gives it a name (§6.1).
@@ -78,6 +88,19 @@ public:
     void attach(Module* owner, std::string_view name);  // defined in module.h
     void setFlatIndex(uint32_t i) { flatIndex_ = i; }
 
+    // Dirty-driven scheduling (§5.2): dirtyGen records the dirty clock value
+    // of the last value change; the engine skips an action while none of its
+    // reads changed after its previous run. Slots are bound at elaboration
+    // into SimState's flat arrays; before elaboration marks are no-ops.
+    uint64_t dirtyGen() const { return (dirtySlot_ != nullptr) ? *dirtySlot_ : 1; }
+    void markDirty() {
+        if (dirtySlot_ != nullptr) *dirtySlot_ = ++(*dirtyClock_);
+    }
+    void bindDirty(uint64_t* slot, uint64_t* clock) {
+        dirtySlot_ = slot;
+        dirtyClock_ = clock;
+    }
+
 protected:
     explicit Entity(EntityKind k) : kind_(k) {}
 
@@ -86,6 +109,8 @@ private:
     Module* owner_ = nullptr;
     std::string name_;
     uint32_t flatIndex_ = 0;
+    uint64_t* dirtySlot_ = nullptr;
+    uint64_t* dirtyClock_ = nullptr;
 };
 
 }  // namespace wolvicmod

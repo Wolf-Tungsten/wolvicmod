@@ -63,12 +63,30 @@ public:
         return (kind_ == Kind::Assign ? "assign -> " : "update -> ") + target_->hierPath();
     }
 
+    // Dirty-driven scheduling (§5.2 fast path): the engine runs an action only
+    // when one of its reads changed (dirty generation > lastRunGen) since its
+    // previous run; a never-run action always runs. Read flat indices live in
+    // SimState::readIdxPool, bound at elaboration.
+    uint64_t lastRunGen() const { return lastRunGen_; }
+    void markRan(uint64_t gen) { lastRunGen_ = gen; }
+    uint32_t readIdxOff() const { return readIdxOff_; }
+    uint32_t readIdxN() const { return readIdxN_; }
+    void bindReadIdx(uint32_t off, uint32_t n) {
+        readIdxOff_ = off;
+        readIdxN_ = n;
+    }
+
     // Combinational phase (§5.2): Assign writes its signal; Update only detects
     // edges and records its intent — no state is touched.
     virtual void run() = 0;
 
-    // State-update phase (Update only).
-    virtual bool intentActive() const { return false; }
+    // State-update phase (Update only). The intent flag is a plain member —
+    // the commit phase polls it once per Update per round, so it must not go
+    // through a virtual call. The commit phase clears the flag after applying
+    // (§5.2): with dirty-driven scheduling an Update whose inputs did not
+    // change is skipped next round, and a stale flag would apply twice.
+    bool intentActive() const { return intentActive_; }
+    void clearIntent() { intentActive_ = false; }
     virtual void applyIntent() {}     // write the intent into the target
     virtual void finalizeTarget() {}  // Reg: commit next slot (NBA)
 
@@ -87,51 +105,86 @@ protected:
     Action(Kind k, Entity* target, Module* ctx, std::vector<Entity*> reads)
         : kind_(k), target_(target), ctx_(ctx), reads_(std::move(reads)) {}
 
+    void setIntentActive(bool v) { intentActive_ = v; }
+
 private:
     Kind kind_;
     Entity* target_;
     Module* ctx_;
     uint32_t regIndex_ = 0;
     std::vector<Entity*> reads_;
+    uint64_t lastRunGen_ = 0;
+    uint32_t readIdxOff_ = 0;
+    uint32_t readIdxN_ = 0;
+    bool intentActive_ = false;
 };
 
-template <class T>
+// The compute functor is stored concrete (template parameter, no
+// std::function): run() is the single type-erased boundary and the whole
+// read-pack -> compute -> store chain inlines into it.
+template <class T, class F>
 class AssignAction : public Action {
 public:
-    AssignAction(Signal<T>* target, Module* ctx, std::vector<Entity*> reads,
-                 std::function<T()> compute)
+    AssignAction(Signal<T>* target, Module* ctx, std::vector<Entity*> reads, F compute)
         : Action(Kind::Assign, target, ctx, std::move(reads)),
           target_(target),
           compute_(std::move(compute)) {}
 
-    void run() override { target_->mutableValue() = compute_(); }
+    void run() override {
+        T& tv = target_->mutableValue();
+        if constexpr (kEqualityComparable<T>) {
+            // Change detection: an unchanged value does not dirty the target,
+            // so downstream actions stay asleep (§5.2 fast path).
+            T v = compute_();
+            if (!(v == tv)) {
+                tv = std::move(v);
+                target_->markDirty();
+            }
+        } else {
+            tv = compute_();
+            target_->markDirty();
+        }
+    }
 
 private:
     Signal<T>* target_;
-    std::function<T()> compute_;
+    F compute_;
 };
 
 struct EventSlot {
     const Entity* sig = nullptr;  // event signal (for trace descriptions)
     EdgeKind kind;
-    std::function<bool()> read;
-    bool prev = false;  // edge-detection history (§5.3)
+    bool (*read)(const Entity*);  // capture-less reader (see core/edge.h)
+    bool prev = false;            // edge-detection history (§5.3)
 };
+
+// Level guard (§3.2), same capture-less representation as EdgeEvent: the guard
+// reads exactly one bool-holding entity.
+struct GuardSlot {
+    const Entity* ent = nullptr;  // nullptr -> no guard
+    bool (*read)(const Entity*) = nullptr;
+};
+
+template <class E>
+GuardSlot makeGuard(E& g) {
+    return {&g,
+            [](const Entity* e) { return static_cast<bool>(static_cast<const E*>(e)->readValue()); }};
+}
 
 // Update action. Target = Reg<T> or Mem<T, R>. When several Updates target the
 // same state, the commit phase applies active intents in reverse registration
 // order so the earliest-registered (highest priority) lands last and wins
 // (§4.3); Mem intents merge per row (§2.4).
-template <class T, class Target>
+template <class T, class Target, class F>
 class UpdateAction : public Action {
 public:
     UpdateAction(Target* target, Module* ctx, std::vector<Entity*> reads,
-                 std::vector<EventSlot> events, std::function<bool()> guard,
-                 std::function<size_t()> addr, std::function<T()> compute)
+                 std::vector<EventSlot> events, GuardSlot guard,
+                 std::function<size_t()> addr, F compute)
         : Action(Kind::Update, target, ctx, std::move(reads)),
           target_(target),
           events_(std::move(events)),
-          guard_(std::move(guard)),
+          guard_(guard),
           addr_(std::move(addr)),
           compute_(std::move(compute)) {}
 
@@ -140,7 +193,7 @@ public:
         edgeSeen_ = false;
         if (detail::traceDescWanted()) edgeDesc_.clear();
         for (auto& e : events_) {
-            const bool cur = e.read();
+            const bool cur = e.read(e.sig);
             const bool hit =
                 (e.kind == EdgeKind::Posedge) ? (!e.prev && cur) : (e.prev && !cur);
             if (hit) {
@@ -154,14 +207,13 @@ public:
             }
             e.prev = cur;
         }
-        active_ = edge && (!guard_ || guard_());
-        if (active_) {
+        const bool active = edge && (guard_.ent == nullptr || guard_.read(guard_.ent));
+        setIntentActive(active);
+        if (active) {
             if constexpr (IsMem<Target>::value) intentRow_ = addr_();
             intent_ = compute_();
         }
     }
-
-    bool intentActive() const override { return active_; }
 
     void applyIntent() override {
         if constexpr (IsMem<Target>::value)
@@ -175,7 +227,7 @@ public:
     }
 
     void initEventPrev() override {
-        for (auto& e : events_) e.prev = e.read();
+        for (auto& e : events_) e.prev = e.read(e.sig);
     }
 
     bool edgeSeen() const override { return edgeSeen_; }
@@ -184,12 +236,11 @@ public:
 private:
     Target* target_;
     std::vector<EventSlot> events_;
-    std::function<bool()> guard_;   // null → no guard
+    GuardSlot guard_;
     std::function<size_t()> addr_;  // Mem only
-    std::function<T()> compute_;
+    F compute_;
     T intent_{};
     size_t intentRow_ = 0;
-    bool active_ = false;
     bool edgeSeen_ = false;
     std::string edgeDesc_;
 };
@@ -277,11 +328,12 @@ std::vector<Entity*> checkReadSet(Module* ctx, const char* what, const std::tupl
     return v;
 }
 
-// Build the type-erased compute thunk. The static_assert enforces the
-// compile-time checks of §3.1: the lambda must be invocable with
-// std::tuple<const Ts&...> and its return must convert to the target type.
+// Build the compute thunk. The static_assert enforces the compile-time checks
+// of §3.1: the lambda must be invocable with std::tuple<const Ts&...> and its
+// return must convert to the target type. The returned closure keeps its
+// concrete type — the action stores it without a std::function wrapper.
 template <class T, class F, class... Es>
-std::function<T()> makeCompute(F&& f, const std::tuple<Es*...>& srcs) {
+auto makeCompute(F&& f, const std::tuple<Es*...>& srcs) {
     using Fd = std::decay_t<F>;
     static_assert(
         std::is_invocable_r_v<T, Fd&, std::tuple<const ReadValueOf<Es>&...>>,
@@ -302,7 +354,7 @@ void registerAssignLambda(Sig* target, F&& f, const std::tuple<Es*...>& srcs) {
     checkAssignTarget(target, ctx);
     std::vector<Entity*> readVec = checkReadSet(ctx, "assign read set", srcs);
     auto compute = makeCompute<typename Sig::Value>(std::forward<F>(f), srcs);
-    ctx->addAction(std::make_unique<AssignAction<typename Sig::Value>>(
+    ctx->addAction(std::make_unique<AssignAction<typename Sig::Value, decltype(compute)>>(
         target, ctx, std::move(readVec), std::move(compute)));
 }
 
@@ -316,7 +368,7 @@ inline void checkUpdateTarget(const Entity* target, Module* ctx) {
 
 template <class Target, class F, class... Es>
 void registerUpdateLambda(Target* target, std::vector<EventSlot> events,
-                          std::vector<Entity*> extraReads, std::function<bool()> guard,
+                          std::vector<Entity*> extraReads, GuardSlot guard,
                           std::function<size_t()> addr, F&& f,
                           const std::tuple<Es*...>& srcs) {
     Module* ctx = currentCtx("update");
@@ -326,9 +378,10 @@ void registerUpdateLambda(Target* target, std::vector<EventSlot> events,
     for (Entity* e : extraReads) checkReadableFrom(e, ctx, "update event/guard/address");
     readVec.insert(readVec.end(), extraReads.begin(), extraReads.end());
     auto compute = makeCompute<typename Target::Value>(std::forward<F>(f), srcs);
-    ctx->addAction(std::make_unique<UpdateAction<typename Target::Value, Target>>(
-        target, ctx, std::move(readVec), std::move(events), std::move(guard),
-        std::move(addr), std::move(compute)));
+    ctx->addAction(
+        std::make_unique<UpdateAction<typename Target::Value, Target, decltype(compute)>>(
+            target, ctx, std::move(readVec), std::move(events), guard,
+            std::move(addr), std::move(compute)));
 }
 
 // Builder templates (defined below) and expression hooks (core/expr.h).
@@ -348,7 +401,7 @@ template <class Sig, class E>
 void registerAssignExpr(Sig* target, E&& expr);
 template <class Target, class E>
 void registerUpdateExpr(Target* target, std::vector<EventSlot> events,
-                        std::vector<Entity*> extraReads, std::function<bool()> guard,
+                        std::vector<Entity*> extraReads, GuardSlot guard,
                         std::function<size_t()> addr, E&& expr);
 
 }  // namespace detail
@@ -438,7 +491,7 @@ public:
             return UpdateAddrBuilder<Target>(target_, std::move(slots), std::move(sigs));
         } else {
             return UpdateReadyBuilder<Target>(target_, std::move(slots), std::move(sigs),
-                                              nullptr, nullptr, false);
+                                              GuardSlot{}, nullptr);
         }
     }
 
@@ -466,7 +519,7 @@ public:
             return v;
         };
         return UpdateReadyBuilder<Target>(target_, std::move(events_), std::move(extraReads_),
-                                          nullptr, std::move(readRow), false);
+                                          GuardSlot{}, std::move(readRow));
     }
 
 private:
@@ -480,29 +533,27 @@ template <class Target>
 class UpdateReadyBuilder {
 public:
     UpdateReadyBuilder(Target* target, std::vector<EventSlot> events,
-                       std::vector<Entity*> extraReads, std::function<bool()> guard,
-                       std::function<size_t()> addr, bool hasGuard)
+                       std::vector<Entity*> extraReads, GuardSlot guard,
+                       std::function<size_t()> addr)
         : target_(target),
           events_(std::move(events)),
           extraReads_(std::move(extraReads)),
-          guard_(std::move(guard)),
-          addr_(std::move(addr)),
-          hasGuard_(hasGuard) {}
+          guard_(guard),
+          addr_(std::move(addr)) {}
 
     // Level guard (§3.2): when the guard fails the Update does not activate.
     template <BoolReadable G>
     auto en(G& g) && {
-        if (hasGuard_) fail(".en(...) specified twice for one Update");
+        if (guard_.ent != nullptr) fail(".en(...) specified twice for one Update");
         extraReads_.push_back(&g);
-        auto guard = [&g] { return static_cast<bool>(g.readValue()); };
         return UpdateReadyBuilder<Target>(target_, std::move(events_), std::move(extraReads_),
-                                          std::move(guard), std::move(addr_), true);
+                                          makeGuard(g), std::move(addr_));
     }
 
     template <Readable... Es>
     auto reads(Es&... es) && {
         return UpdateReadsBuilder<Target, Es...>(target_, std::move(events_),
-                                                 std::move(extraReads_), std::move(guard_),
+                                                 std::move(extraReads_), guard_,
                                                  std::move(addr_), std::tuple<Es*...>(&es...));
     }
 
@@ -513,17 +564,17 @@ public:
         using T = typename Target::Value;
         if constexpr (IsExpr<S>::value) {
             registerUpdateExpr(target_, std::move(events_), std::move(extraReads_),
-                               std::move(guard_), std::move(addr_), std::forward<Src>(src));
+                               guard_, std::move(addr_), std::forward<Src>(src));
         } else if constexpr (Readable<S>) {
             registerUpdateLambda(target_, std::move(events_), std::move(extraReads_),
-                                 std::move(guard_), std::move(addr_),
+                                 guard_, std::move(addr_),
                                  [](auto t) -> const ReadValueOf<S>& { return std::get<0>(t); },
                                  std::tuple<S*>(&src));
         } else if constexpr (std::is_constructible_v<T, Src>) {
             static_assert(std::is_copy_constructible_v<T>,
                           "constant fast path requires a copy-constructible value type");
             registerUpdateLambda(target_, std::move(events_), std::move(extraReads_),
-                                 std::move(guard_), std::move(addr_),
+                                 guard_, std::move(addr_),
                                  [val = T(std::forward<Src>(src))](auto) -> const T& { return val; },
                                  std::tuple<>());
         } else {
@@ -537,35 +588,34 @@ private:
     Target* target_;
     std::vector<EventSlot> events_;
     std::vector<Entity*> extraReads_;
-    std::function<bool()> guard_;
+    GuardSlot guard_;
     std::function<size_t()> addr_;
-    bool hasGuard_;
 };
 
 template <class Target, class... Es>
 class UpdateReadsBuilder {
 public:
     UpdateReadsBuilder(Target* target, std::vector<EventSlot> events,
-                       std::vector<Entity*> extraReads, std::function<bool()> guard,
+                       std::vector<Entity*> extraReads, GuardSlot guard,
                        std::function<size_t()> addr, std::tuple<Es*...> srcs)
         : target_(target),
           events_(std::move(events)),
           extraReads_(std::move(extraReads)),
-          guard_(std::move(guard)),
+          guard_(guard),
           addr_(std::move(addr)),
           srcs_(srcs) {}
 
     template <class F>
     void operator=(F&& f) && {
         registerUpdateLambda(target_, std::move(events_), std::move(extraReads_),
-                             std::move(guard_), std::move(addr_), std::forward<F>(f), srcs_);
+                             guard_, std::move(addr_), std::forward<F>(f), srcs_);
     }
 
 private:
     Target* target_;
     std::vector<EventSlot> events_;
     std::vector<Entity*> extraReads_;
-    std::function<bool()> guard_;
+    GuardSlot guard_;
     std::function<size_t()> addr_;
     std::tuple<Es*...> srcs_;
 };

@@ -199,13 +199,13 @@ void registerAssignExpr(Sig* target, E&& expr) {
     static_assert(std::is_constructible_v<T, decltype(evalNode(ex))>,
                   "expression result must convert to the assign target type (§3.1)");
     auto compute = [ex = std::move(ex)]() mutable -> T { return evalNode(ex); };
-    ctx->addAction(std::make_unique<AssignAction<T>>(target, ctx, std::move(readVec),
-                                                     std::function<T()>(std::move(compute))));
+    ctx->addAction(std::make_unique<AssignAction<T, decltype(compute)>>(
+        target, ctx, std::move(readVec), std::move(compute)));
 }
 
 template <class Target, class E>
 void registerUpdateExpr(Target* target, std::vector<EventSlot> events,
-                        std::vector<Entity*> extraReads, std::function<bool()> guard,
+                        std::vector<Entity*> extraReads, GuardSlot guard,
                         std::function<size_t()> addr, E&& expr) {
     using Ex = std::decay_t<E>;
     using T = typename Target::Value;
@@ -223,9 +223,9 @@ void registerUpdateExpr(Target* target, std::vector<EventSlot> events,
     static_assert(std::is_constructible_v<T, decltype(evalNode(ex))>,
                   "expression result must convert to the update target type (§3.2)");
     auto compute = [ex = std::move(ex)]() mutable -> T { return evalNode(ex); };
-    ctx->addAction(std::make_unique<UpdateAction<T, Target>>(
-        target, ctx, std::move(readVec), std::move(events), std::move(guard),
-        std::move(addr), std::function<T()>(std::move(compute))));
+    ctx->addAction(std::make_unique<UpdateAction<T, Target, decltype(compute)>>(
+        target, ctx, std::move(readVec), std::move(events), guard,
+        std::move(addr), std::move(compute)));
 }
 
 }  // namespace wolvicmod::detail
