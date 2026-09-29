@@ -38,6 +38,7 @@ public:
     OUT(ValidT, deq);
 
     REG(StageArr, stages);
+    WIRE(bool, w_live);
 
     ValidPipe() {
         deq.assign().reads(stages) = [](auto src) {
@@ -47,7 +48,16 @@ public:
             o.bits = stages[N - 1].bits;
             return o;
         };
-        stages.update().on(posedge(clk)).reads(stages, enq) = [](auto src) {
+        // 活性门（perf-breakdown §19）：管线全空且入口无 valid 时整条 update
+        // 休眠（此时移位是恒等操作，休眠不改变任何可观察行为）。
+        w_live.assign().reads(stages, enq) = [](auto src) {
+            auto [stages, enq] = src;
+            if (enq.valid) return true;
+            for (const auto& s : stages)
+                if (s.valid) return true;
+            return false;
+        };
+        stages.update().on(posedge(clk)).en(w_live).reads(stages, enq) = [](auto src) {
             auto [stages, enq] = src;
             StageArr next = stages;
             next[0].valid = enq.valid;
