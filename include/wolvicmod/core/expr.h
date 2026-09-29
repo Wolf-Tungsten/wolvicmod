@@ -199,7 +199,7 @@ void registerAssignExpr(Sig* target, E&& expr) {
     static_assert(std::is_constructible_v<T, decltype(evalNode(ex))>,
                   "expression result must convert to the assign target type (§3.1)");
     auto compute = [ex = std::move(ex)]() mutable -> T { return evalNode(ex); };
-    ctx->addAction(std::make_unique<AssignAction<T, decltype(compute)>>(
+    ctx->addAction(ctx->makeAction<AssignAction<T, decltype(compute)>>(
         target, ctx, std::move(readVec), std::move(compute)));
 }
 
@@ -218,14 +218,30 @@ void registerUpdateExpr(Target* target, std::vector<EventSlot> events,
     collectLeaves(ex, readVec);
     for (const Entity* r : readVec) checkReadableFrom(r, ctx, "update expression");
     for (const Entity* r : extraReads) checkReadableFrom(r, ctx, "update event/guard/address");
+
+    // Same edge-direction filtering eligibility as registerUpdateLambda: the
+    // event signal must not also appear as an expression leaf, guard,
+    // address, or second event.
+    std::vector<std::pair<const Entity*, EdgeKind>> eligible;
+    for (const EventSlot& ev : events) {
+        size_t evN = 0, erN = 0;
+        for (const EventSlot& e2 : events) evN += (e2.sig == ev.sig) ? 1 : 0;
+        for (const Entity* r : extraReads) erN += (r == ev.sig) ? 1 : 0;
+        bool inSrcs = false;
+        for (const Entity* r : readVec) inSrcs = inSrcs || (r == ev.sig);
+        if (evN == 1 && erN == 1 && !inSrcs) eligible.emplace_back(ev.sig, ev.kind);
+    }
+
     readVec.insert(readVec.end(), extraReads.begin(), extraReads.end());
     dedupeReads(readVec);
     static_assert(std::is_constructible_v<T, decltype(evalNode(ex))>,
                   "expression result must convert to the update target type (§3.2)");
     auto compute = [ex = std::move(ex)]() mutable -> T { return evalNode(ex); };
-    ctx->addAction(std::make_unique<UpdateAction<T, Target, decltype(compute)>>(
+    auto* action = ctx->makeAction<UpdateAction<T, Target, decltype(compute)>>(
         target, ctx, std::move(readVec), std::move(events), guard,
-        std::move(addr), std::move(compute)));
+        std::move(addr), std::move(compute));
+    for (const auto& [sig, kind] : eligible) action->registerEdgeWatch(sig, kind);
+    ctx->addAction(action);
 }
 
 }  // namespace wolvicmod::detail

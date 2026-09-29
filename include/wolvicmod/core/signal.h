@@ -19,7 +19,7 @@ public:
     // Readable protocol: readValue() feeds read sets (const ref, §3.1).
     const T& readValue() const {
         detail::auditTouch(this);
-        return value_;
+        return effective();
     }
 
     // External observation (§3.5).
@@ -42,14 +42,20 @@ public:
     auto assign();
 
     // --- internal ---
-    T& mutableValue() { return value_; }
+    T& mutableValue() { return alias_ != nullptr ? *alias_ : value_; }
+
+    // Identity-connect aliasing (§5.2): valueStorage() is the effective value
+    // address (the canonical source's own storage); aliasStorageTo() redirects
+    // this signal's reads/writes to the canonical source's storage.
+    void* valueStorage() override { return alias_ != nullptr ? static_cast<void*>(alias_) : static_cast<void*>(&value_); }
+    void aliasStorageTo(void* p) override { alias_ = static_cast<T*>(p); }
 
     bool snapshotSupported() const override { return kSnapshotable; }
     void snapshotSave() override {
-        if constexpr (kSnapshotable) snap_.emplace(value_);
+        if constexpr (kSnapshotable) snap_.emplace(effective());
     }
     bool snapshotChanged() const override {
-        if constexpr (kSnapshotable) return !snap_.has_value() || !(*snap_ == value_);
+        if constexpr (kSnapshotable) return !snap_.has_value() || !(*snap_ == effective());
         else return true;
     }
 
@@ -59,7 +65,7 @@ public:
         else return 0;
     }
     void waveFormat(std::string& out) const override {
-        if constexpr (FstFormattable<T>) FstFormat<T>::format(out, value_);
+        if constexpr (FstFormattable<T>) FstFormat<T>::format(out, effective());
     }
 
 protected:
@@ -71,7 +77,13 @@ private:
             { x == y } -> std::convertible_to<bool>;
         } && std::copy_constructible<T>;
 
+    // Effective value: the alias target when storage-aliased (elaboration),
+    // otherwise the inline cell. The alias_ test adds no dependent load on
+    // the non-aliased path (value_ sits at a fixed offset).
+    const T& effective() const { return alias_ != nullptr ? *alias_ : value_; }
+
     T value_{};
+    T* alias_ = nullptr;
     std::optional<T> snap_;
 };
 

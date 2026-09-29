@@ -39,34 +39,20 @@ inline void Module::elaborate(std::string_view topName) {
     // spurious edges (§5.3).
     for (Action* a : flat.actions) a->initEventPrev();
 
+    // Identity-connect aliasing (§5.2): eliminate same-type identity assigns
+    // by storage aliasing; canon maps every entity to its canonical source.
+    std::vector<uint32_t> canon;
+    detail::resolveAliases(flat, canon);
+
     auto sim = std::make_unique<detail::SimState>();
-    detail::buildExecOrder(flat, *sim);
+
+    detail::buildExecOrder(flat, *sim, canon);
     detail::buildUpdateChains(flat, *sim);
 
-    // Bind dirty-driven scheduling state (§5.2 fast path): entity slots point
-    // into sim->dirtyGens (allocated once, never reallocated); each action's
-    // read flat indices concatenate into sim->readIdxPool.
-    sim->dirtyGens.assign(flat.entities.size(), 1);
-    for (uint32_t i = 0; i < flat.entities.size(); ++i)
-        flat.entities[i]->bindDirty(&sim->dirtyGens[i], &sim->clock);
-    for (Action* a : flat.actions) {
-        const uint32_t off = static_cast<uint32_t>(sim->readIdxPool.size());
-        for (const Entity* r : a->reads()) sim->readIdxPool.push_back(r->flatIndex());
-        a->bindReadIdx(off, static_cast<uint32_t>(sim->readIdxPool.size()) - off);
-    }
-
-    // Scheduling-mode escape hatch: WOLVICMOD_DIRTY_EVAL=0 forces full
-    // re-evaluation; =poll selects the legacy dirty-generation scan (A/B).
-    if (const char* e = std::getenv("WOLVICMOD_DIRTY_EVAL")) {
-        if (e[0] == '0')
-            sim->schedMode = detail::SchedMode::Full;
-        else if (std::string_view(e) == "poll")
-            sim->schedMode = detail::SchedMode::Poll;
-    }
-
-    // First eval() runs everything (the push-path equivalent of poll mode's
-    // never-run rule, lastRunGen == 0).
-    for (uint32_t pos = 0; pos < sim->execOrder.size(); ++pos) sim->readyQ.push(pos);
+    // Flat dispatch: first eval() runs every action once, then dirty bitmaps
+    // take over.
+    for (uint32_t pos = 0; pos < sim->execOrder.size(); ++pos)
+        sim->actBits[pos >> 6] |= uint64_t{1} << (pos & 63);
 
     sim_ = std::move(sim);
 

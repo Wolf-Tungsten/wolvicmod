@@ -8,6 +8,7 @@
 #include <string_view>
 #include <type_traits>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "wolvicmod/core/entity.h"
@@ -29,6 +30,32 @@ inline std::vector<Module*>& ctxStack() {
     static thread_local std::vector<Module*> s;
     return s;
 }
+
+// Action ownership registry (§5.2): actions live as long as their module and
+// are destroyed wholesale at teardown. Allocation is plain per-object new —
+// a bump-arena layout measured SLOWER than malloc's size-class grouping
+// (registration-order interleaving breaks same-type adjacency, which is what
+// the phase-1 scan and phase-2 chain walks actually benefit from; see
+// proj-xiangshan-l3 perf-breakdown §13).
+class ActionArena {
+public:
+    ActionArena() = default;
+    ActionArena(const ActionArena&) = delete;
+    ActionArena& operator=(const ActionArena&) = delete;
+    ~ActionArena() {
+        for (auto it = dtors_.rbegin(); it != dtors_.rend(); ++it) it->second(it->first);
+    }
+
+    template <class A, class... Args>
+    A* make(Args&&... args) {
+        A* a = new A(std::forward<Args>(args)...);
+        dtors_.emplace_back(a, [](void* q) { delete static_cast<A*>(q); });
+        return a;
+    }
+
+private:
+    std::vector<std::pair<void*, void (*)(void*)>> dtors_;
+};
 }  // namespace detail
 
 // Array of child-module handles (§6.1): wraps the pointer array (C++ has no
@@ -135,17 +162,17 @@ public:
     void assertUpdateMutexOn();   // report simultaneously-active Updates
     void assertUpdateMutexOff();
 
-    // Dirty-driven scheduling switch (§5.2), defined in sim/engine.h.
-    // Default on (push dispatch); dirtyEvalOff() falls back to classic full
-    // re-evaluation (every action runs every round) for A/B debugging.
-    void dirtyEvalOn();
-    void dirtyEvalOff();
-
     // --- internal (framework use) ---
     const std::vector<std::unique_ptr<Entity>>& entities() const { return entities_; }
     const std::vector<std::unique_ptr<Module>>& children() const { return children_; }
-    const std::vector<std::unique_ptr<Action>>& actions() const { return actions_; }
-    void addAction(std::unique_ptr<Action> a);  // defined in core/action.h
+    // Actions are arena-owned (actionArena_): actions() is a non-owning
+    // registry for elaboration-time collection.
+    const std::vector<Action*>& actions() const { return actions_; }
+    void addAction(Action* a);  // defined in core/action.h
+    template <class A, class... Args>
+    A* makeAction(Args&&... args) {
+        return actionArena_.make<A>(std::forward<Args>(args)...);
+    }
 
     void registerName(std::string_view name) {
         if (!names_.emplace(name).second)
@@ -170,9 +197,10 @@ private:
 
     Module* parent_ = nullptr;
     std::string name_;
+    detail::ActionArena actionArena_;  // declared first: destructed last
     std::vector<std::unique_ptr<Entity>> entities_;
     std::vector<std::unique_ptr<Module>> children_;
-    std::vector<std::unique_ptr<Action>> actions_;
+    std::vector<Action*> actions_;  // non-owning; owned by actionArena_
     std::unordered_set<std::string> names_;
     std::unique_ptr<detail::SimState> sim_;
 };
@@ -199,12 +227,16 @@ void In<T>::set(const T& v) {
         detail::fail("set(): call elaborate() before driving inputs ('" + this->hierPath() + "')");
     T& tv = this->mutableValue();
     // Change detection (§5.2 fast path): re-driving the same value dirties
-    // nothing, so the next eval() skips the quiescent cone.
+    // nothing, so the next eval() skips the quiescent cone. Bool inputs
+    // report the transition direction for edge-direction-filtered dispatch.
     if constexpr (kEqualityComparable<T>) {
         if (tv == v) return;
     }
     tv = v;
-    this->markDirty();
+    if constexpr (std::is_same_v<T, bool>)
+        this->markDirtyBool(tv);
+    else
+        this->markDirty();
 }
 
 }  // namespace wolvicmod

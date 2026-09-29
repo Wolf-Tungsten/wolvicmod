@@ -1,5 +1,6 @@
 #pragma once
 
+#include <type_traits>
 #include <utility>
 
 #include "wolvicmod/core/entity.h"
@@ -40,14 +41,27 @@ public:
 
     // --- internal ---
     T& nextSlot() { return next_; }
+
+    // Identity-connect aliasing (§5.2): a Reg can be the alias source; readers
+    // bind to cur_'s storage. commitNext() writes cur_ in place, so the bound
+    // address stays valid across commits.
+    void* valueStorage() override { return &cur_; }
+    void* nextStorage() override { return &next_; }
+    bool bitwiseEqOk() const override { return std::has_unique_object_representations_v<T>; }
+    bool isBoolReg() const override { return std::is_same_v<T, bool>; }
     void commitNext() {
         // Change detection (§5.2 fast path): a commit that lands the current
-        // value dirties nothing, so downstream logic stays asleep.
+        // value dirties nothing, so downstream logic stays asleep. Bool
+        // commits report the transition direction for edge-direction-
+        // filtered dispatch.
         if constexpr (kEqualityComparable<T>) {
             if (cur_ == next_) return;
         }
         cur_ = std::move(next_);
-        markDirty();
+        if constexpr (std::is_same_v<T, bool>)
+            markDirtyBool(cur_);
+        else
+            markDirty();
     }
 
 private:

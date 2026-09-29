@@ -130,8 +130,9 @@ TEST_CASE("M3: legal combinational cycle becomes one SCC group (§4.3)") {
     REQUIRE(sim->groups.size() == 1);
     CHECK(sim->groups[0]->actions.size() == 2);
     CHECK(sim->groups[0]->signals.size() == 2);
-    // exec: SCC group + the output assign
-    CHECK(sim->execOrder.size() == 2);
+    // exec: SCC group only — the identity output assign (o = y) is
+    // alias-eliminated at elaboration (§5.2).
+    CHECK(sim->execOrder.size() == 1);
 }
 
 TEST_CASE("M3: self-loop is a non-trivial SCC") {

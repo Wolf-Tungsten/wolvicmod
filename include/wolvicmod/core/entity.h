@@ -6,8 +6,6 @@
 #include <string_view>
 #include <vector>
 
-#include "wolvicmod/core/readyq.h"
-
 namespace wolvicmod {
 
 class Module;
@@ -90,47 +88,107 @@ public:
     void attach(Module* owner, std::string_view name);  // defined in module.h
     void setFlatIndex(uint32_t i) { flatIndex_ = i; }
 
-    // Dirty-driven scheduling (§5.2 fast path): dirtyGen records the dirty
-    // clock value of the last value change (legacy poll path); the push path
-    // notifies dependent actions through the reverse dependency map.
-    // Slots are bound at elaboration into SimState's flat arrays; before
-    // elaboration marks are no-ops.
-    uint64_t dirtyGen() const { return (dirtySlot_ != nullptr) ? *dirtySlot_ : 1; }
+    // Identity-connect aliasing (§5.2): a same-type identity assign
+    // (b = a fast path) is eliminated at elaboration — the target's value
+    // storage aliases the canonical source's, and consumers rewire to the
+    // canonical entity in the evaluation graph. valueStorage() exposes the
+    // effective value address (nullptr for Mem / non-value entities);
+    // aliasStorageTo() redirects a Signal's storage.
+    virtual void* valueStorage() { return nullptr; }
+    virtual void aliasStorageTo(void*) {}
+
+    // Phase-2 fast commit (§5.2): Reg overrides expose the next slot and the
+    // value-type properties so the commit path can apply intents and detect
+    // changes with type-agnostic byte ops instead of virtual calls.
+    virtual void* nextStorage() { return nullptr; }
+    // True when bitwise equality implies value equality (no padding bits), so
+    // memcmp is an exact change test; false means the typed commit path keeps
+    // operator== semantics.
+    virtual bool bitwiseEqOk() const { return false; }
+    virtual bool isBoolReg() const { return false; }
+
+    // Dirty-driven dispatch (§5.2): a value change notifies dependent actions
+    // by setting one bit per dependent in the flat activity bitmap (the bit
+    // OR is idempotent — the bit IS the dedup). Slots are bound at
+    // elaboration into SimState's flat arrays; before elaboration marks are
+    // no-ops.
     void markDirty() {
-        if (dirtySlot_ != nullptr) {
-            *dirtySlot_ = ++(*dirtyClock_);
-            // Push notification happens in every scheduling mode: pushes are
-            // deduped and a superset drain is harmless (actions are pure
-            // functions of their reads), so switching modes mid-run never
-            // needs a queue reset.
-            if (depN_ != 0) readyQ_->pushDeps(deps_, depN_);
+        if (actBits_ == nullptr) return;
+        pushDeps();
+        // The transition direction is unknown here, so edge watchers of both
+        // directions are notified conservatively (they maintain their own
+        // edge history when they run).
+        pushWatch(posWatch_, posWatchN_);
+        pushWatch(negWatch_, negWatchN_);
+    }
+
+    // Edge-direction-filtered dispatch (§5.2): a dependent Update whose only
+    // use of this entity is a single one-direction edge event sits in the
+    // matching watch list instead of the always-notify dependency list. Bool
+    // write sites know the transition direction: watchers of the matching
+    // edge are notified; opposite watchers only have their edge history
+    // advanced (prev = the value they would have observed), which is what
+    // keeps a skipped Update's next edge detection correct. Correctness
+    // relies on one transition per entity per round, so entities driven from
+    // inside an SCC group (steady-state iteration may rewrite them) are never
+    // put into watch lists (see buildExecOrder).
+    void markDirtyBool(bool v) {
+        if (actBits_ == nullptr) return;
+        pushDeps();
+        if (v) {
+            pushWatch(posWatch_, posWatchN_);
+            for (uint32_t i = 0; i < negWatchN_; ++i) *negWatch_[i].prev = true;
+        } else {
+            pushWatch(negWatch_, negWatchN_);
+            for (uint32_t i = 0; i < posWatchN_; ++i) *posWatch_[i].prev = false;
         }
     }
-    void bindDirty(uint64_t* slot, uint64_t* clock) {
-        dirtySlot_ = slot;
-        dirtyClock_ = clock;
+
+    struct EdgeWatchDep {
+        uint32_t execPos;
+        bool* prev;  // the watcher's EventSlot::prev, kept current on skips
+    };
+    void bindEdgeWatches(const EdgeWatchDep* pos, uint32_t posN, const EdgeWatchDep* neg,
+                         uint32_t negN) {
+        posWatch_ = pos;
+        posWatchN_ = posN;
+        negWatch_ = neg;
+        negWatchN_ = negN;
     }
-    // Reverse dependency map row (CSR into SimState::depPool) + the queue to
-    // notify. Bound at elaboration together with bindDirty.
-    void bindDeps(const uint32_t* deps, uint32_t n, detail::ReadyQueue* q) {
+
+    // Reverse dependency map row (CSR into SimState::depPool) plus the flat
+    // activity bitmap the row's bits are set into. Bound at elaboration.
+    void bindDeps(const uint32_t* deps, uint32_t n, uint64_t* actBits) {
         deps_ = deps;
         depN_ = n;
-        readyQ_ = q;
+        actBits_ = actBits;
     }
 
 protected:
     explicit Entity(EntityKind k) : kind_(k) {}
 
 private:
+    static void setBit(uint64_t* bits, uint32_t pos) {
+        bits[pos >> 6] |= uint64_t{1} << (pos & 63);
+    }
+    void pushDeps() {
+        for (uint32_t i = 0; i < depN_; ++i) setBit(actBits_, deps_[i]);
+    }
+    void pushWatch(const EdgeWatchDep* w, uint32_t n) {
+        for (uint32_t i = 0; i < n; ++i) setBit(actBits_, w[i].execPos);
+    }
+
     EntityKind kind_;
     Module* owner_ = nullptr;
     std::string name_;
     uint32_t flatIndex_ = 0;
-    uint64_t* dirtySlot_ = nullptr;
-    uint64_t* dirtyClock_ = nullptr;
     const uint32_t* deps_ = nullptr;      // CSR row into SimState::depPool
     uint32_t depN_ = 0;
-    detail::ReadyQueue* readyQ_ = nullptr;
+    uint64_t* actBits_ = nullptr;         // flat activity bitmap
+    const EdgeWatchDep* posWatch_ = nullptr;  // CSR rows into SimState watch pools
+    uint32_t posWatchN_ = 0;
+    const EdgeWatchDep* negWatch_ = nullptr;
+    uint32_t negWatchN_ = 0;
 };
 
 }  // namespace wolvicmod

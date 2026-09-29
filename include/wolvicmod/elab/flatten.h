@@ -20,7 +20,7 @@ struct FlatModel {
 
 inline void flattenInto(Module* m, FlatModel& out) {
     for (auto& e : m->entities()) out.entities.push_back(e.get());
-    for (auto& a : m->actions()) out.actions.push_back(a.get());
+    for (auto& a : m->actions()) out.actions.push_back(a);
     for (auto& c : m->children()) flattenInto(c.get(), out);
 }
 
@@ -52,6 +52,47 @@ inline void checkSignalDrivers(const Module& root, const FlatModel& flat) {
                 msg += "\n  assign registered in module '" + a->ctx()->hierPath() + "'";
             fail(msg);
         }
+    }
+}
+
+// Identity-connect aliasing (§5.2): same-type identity assigns (b = a fast
+// path, tagged via Action::aliasSource) are eliminated — the target's value
+// storage aliases the source's, and consumers rewire to the canonical entity
+// when the evaluation graph is built (buildExecOrder takes the canon map).
+// Union-find over flat entity indices with the source side as the canonical
+// root. An alias cycle (a = b; b = a) has no ultimate source: the closing
+// pair keeps its copy action (semantics unchanged, it degenerates to a
+// self-copy through the aliased storage).
+inline void resolveAliases(const FlatModel& flat, std::vector<uint32_t>& canon) {
+    const uint32_t E = static_cast<uint32_t>(flat.entities.size());
+    canon.resize(E);
+    for (uint32_t i = 0; i < E; ++i) canon[i] = i;
+    auto find = [&](uint32_t x) {
+        uint32_t r = x;
+        while (canon[r] != r) r = canon[r];
+        while (canon[x] != r) {
+            const uint32_t p = canon[x];
+            canon[x] = r;
+            x = p;
+        }
+        return r;
+    };
+    for (Action* a : flat.actions) {
+        const Entity* src = a->aliasSource();
+        if (src == nullptr) continue;
+        const uint32_t rt = find(a->target()->flatIndex());
+        const uint32_t rs = find(src->flatIndex());
+        if (rt == rs) continue;  // alias cycle: keep the copy action
+        if (flat.entities[rs]->valueStorage() == nullptr) continue;  // no aliasable storage
+        canon[rt] = rs;
+        a->eliminate();
+    }
+    // Bind aliased storage after the map is final: canonical roots are never
+    // aliased, so their valueStorage() is their own inline cell.
+    for (Action* a : flat.actions) {
+        if (!a->eliminated()) continue;
+        Entity* t = a->target();
+        t->aliasStorageTo(flat.entities[find(t->flatIndex())]->valueStorage());
     }
 }
 
