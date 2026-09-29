@@ -44,11 +44,23 @@ inline void Module::traceOn(std::ostream& os) {
     if (sim_ == nullptr) detail::fail("traceOn(): call elaborate() first ('" + hierPath() + "')");
     sim_->trace = std::make_unique<detail::TextTracer>(os);
     detail::traceDescFlag() = true;
+    // edgeBit 快径在 trace 模式回退 prev 检测：写入点自此恢复 prev 维护
+    // （entity.h watchTraceMode），这里把所有事件历史重新同步到当前值，
+    // 消除快径期间 prev 停更留下的陈旧。
+    detail::watchTraceMode() = true;
+    for (auto& item : sim_->execOrder) {
+        if (item.single != nullptr) {
+            item.single->initEventPrev();
+        } else {
+            for (Action* a : sim_->groups[item.group]->actions) a->initEventPrev();
+        }
+    }
 }
 
 inline void Module::traceOff() {
     if (sim_ != nullptr) sim_->trace.reset();
     detail::traceDescFlag() = false;
+    detail::watchTraceMode() = false;
 }
 
 }  // namespace wolvicmod

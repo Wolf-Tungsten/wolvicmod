@@ -117,6 +117,9 @@ public:
         // transition — false means the edge is consumed without dispatch.
         const Entity* guard = nullptr;
         bool (*guardRead)(const Entity*) = nullptr;
+        // EdgeBit 模式：单事件 Update 的边沿事实由写入点直接置位
+        // （edgeBits 位图），跳过/反向不再维护 prev。
+        bool edgeBit = false;
     };
     const std::vector<EdgeWatch>& edgeWatches() const { return edgeWatches_; }
 
@@ -146,6 +149,13 @@ public:
         memberBit_ = bit;
     }
 
+    // EdgeBit 模式绑定（elaboration）：本动作在 execOrder 中的位置与
+    // edgeBits 位图基址——run() 用它测试并清除自己的边沿事实位。
+    void bindEdgeBit(uint32_t pos, uint64_t* edgeBits) {
+        execPos_ = pos;
+        edgeBits_ = edgeBits;
+    }
+
 protected:
     Action(Kind k, Entity* target, Module* ctx, std::vector<Entity*> reads)
         : kind_(k), target_(target), ctx_(ctx), reads_(std::move(reads)) {}
@@ -165,9 +175,13 @@ protected:
         commitBits_[commitChain_ >> 6] |= uint64_t{1} << (commitChain_ & 63);
     }
     void addEdgeWatch(const Entity* sig, EdgeKind kind, bool* prev, const Entity* guard,
-                      bool (*guardRead)(const Entity*)) {
-        edgeWatches_.push_back({sig, kind, prev, guard, guardRead});
+                      bool (*guardRead)(const Entity*), bool edgeBit) {
+        edgeWatches_.push_back({sig, kind, prev, guard, guardRead, edgeBit});
     }
+
+    // EdgeBit 模式状态（bindEdgeBit 绑定，UpdateAction::run 使用）
+    uint32_t execPos_ = 0;           // execOrder position (edgeBit mode)
+    uint64_t* edgeBits_ = nullptr;   // flat edge-fact bitmap
 
 private:
     Kind kind_;
@@ -229,6 +243,9 @@ struct EventSlot {
     EdgeKind kind;
     bool (*read)(const Entity*);  // capture-less reader (see core/edge.h)
     bool prev = false;            // edge-detection history (§5.3)
+    // EdgeBit 模式（单事件 watch-listed Update）：边沿事实由写入点直接置
+    // edgeBits 位，run() 测试并清除，prev 历史免维护（trace 模式回退 prev）。
+    bool watchEdgeBit = false;
 };
 
 // Level guard (§3.2), same capture-less representation as EdgeEvent: the guard
@@ -271,9 +288,18 @@ public:
         edgeSeen_ = false;
         if (detail::traceDescWanted()) edgeDesc_.clear();
         for (auto& e : events_) {
-            const bool cur = e.read(e.sig);
-            const bool hit =
-                (e.kind == EdgeKind::Posedge) ? (!e.prev && cur) : (e.prev && !cur);
+            bool hit;
+            if (e.watchEdgeBit && !detail::watchTraceMode()) {
+                // EdgeBit 快径：边沿事实由写入点置位（本动作激活即说明
+                // 匹配方向跳变发生），测试并清除；信号与 prev 都不读。
+                const uint64_t m = uint64_t{1} << (execPos_ & 63);
+                hit = (edgeBits_[execPos_ >> 6] & m) != 0;
+                if (hit) edgeBits_[execPos_ >> 6] &= ~m;
+            } else {
+                const bool cur = e.read(e.sig);
+                hit = (e.kind == EdgeKind::Posedge) ? (!e.prev && cur) : (e.prev && !cur);
+                e.prev = cur;
+            }
             if (hit) {
                 edge = true;
                 edgeSeen_ = true;
@@ -283,7 +309,6 @@ public:
                     edgeDesc_ += e.sig->hierPath();
                 }
             }
-            e.prev = cur;
         }
         const bool guardPass = guard_.ent == nullptr || guard_.read(guard_.ent);
         detail::statUpdateRun(edge, guardPass);
@@ -347,7 +372,11 @@ public:
     void registerEdgeWatch(const Entity* sig, EdgeKind kind) {
         for (auto& e : events_)
             if (e.sig == sig && e.kind == kind) {
-                addEdgeWatch(sig, kind, &e.prev, guard_.ent, guard_.read);
+                // EdgeBit 模式仅限单事件 Update：多位事件共享一个 execPos
+                // 位无法区分边沿来自哪个信号，保持 prev 检测。
+                const bool eb = events_.size() == 1;
+                e.watchEdgeBit = eb;
+                addEdgeWatch(sig, kind, &e.prev, guard_.ent, guard_.read, eb);
                 return;
             }
     }

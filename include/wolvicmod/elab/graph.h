@@ -92,6 +92,9 @@ struct SimState {
     // Updates OR chain bits into chainBits when their intent rises.
     std::vector<uint64_t> actBits;    // per execOrder position
     std::vector<uint64_t> chainBits;  // per priority chain
+    // EdgeBit 模式（§25 后续）：bool 写入点对单事件 watch-listed Update
+    // 直接置的边沿事实位（同样按 execOrder 位置索引），run() 测试并清除。
+    std::vector<uint64_t> edgeBits;   // per execOrder position
     std::vector<const Entity*> committed;  // per-round scratch: first 64 commits (diagnostics)
     size_t committedN = 0;                 // commits this round (convergence test)
     std::vector<uint32_t> depPool;      // dependent exec positions, CSR
@@ -408,7 +411,13 @@ inline void buildExecOrder(const FlatModel& flat, SimState& sim,
                      " but consumed at " + std::to_string(pos));
             if (const auto* w = filterable(pos, ri)) {
                 auto& pool = (w->kind == EdgeKind::Posedge) ? posW[ri] : negW[ri];
-                pool.push_back({pos, w->prev, w->guard, w->guardRead});
+                // 守卫预过滤（§5.2 push）：此处已跑完别名解析，守卫实体的
+                // valueStorage() 即有效存储地址——写入点过滤退化为一次加载。
+                const bool* gv =
+                    w->guard != nullptr
+                        ? static_cast<const bool*>(const_cast<Entity*>(w->guard)->valueStorage())
+                        : nullptr;
+                pool.push_back({pos, w->prev, gv, w->edgeBit});
             } else {
                 sim.depPool[cursor[ri]++] = pos;
             }
@@ -416,9 +425,17 @@ inline void buildExecOrder(const FlatModel& flat, SimState& sim,
     // Flat activity bitmap: one bit per execOrder position. Allocated to its
     // final size before binding (entities hold the data pointer).
     sim.actBits.assign((nItems + 63) / 64, 0);
+    sim.edgeBits.assign((nItems + 63) / 64, 0);
     for (uint32_t i = 0; i < E; ++i)
         flat.entities[i]->bindDeps(sim.depPool.data() + sim.depOff[i],
-                                   sim.depOff[i + 1] - sim.depOff[i], sim.actBits.data());
+                                   sim.depOff[i + 1] - sim.depOff[i], sim.actBits.data(),
+                                   sim.edgeBits.data());
+    // EdgeBit 模式绑定：watch-listed（单事件）Update 获知自己的 execOrder
+    // 位置与 edgeBits 基址，run() 据此测试并清除边沿事实位。
+    for (uint32_t pos = 0; pos < nItems; ++pos)
+        if (sim.execOrder[pos].single != nullptr &&
+            !sim.execOrder[pos].single->edgeWatches().empty())
+            sim.execOrder[pos].single->bindEdgeBit(pos, sim.edgeBits.data());
     // Flatten the per-entity watch lists into CSR pools and bind them.
     std::vector<uint32_t> posOff(E + 1, 0), negOff(E + 1, 0);
     for (uint32_t i = 0; i < E; ++i) {

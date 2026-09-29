@@ -36,6 +36,15 @@ inline void auditTouch(const Entity* e) {
 #endif
 }
 
+// Round-trace mode flag (§6.3): while a trace sink is attached, edge-watched
+// Updates fall back to prev-based edge detection and write sites maintain
+// prev (the edgeBit fast path is off) — trace needs per-edge history that the
+// edgeBit bitmap does not keep. Set by traceOn()/traceOff().
+inline bool& watchTraceMode() {
+    static bool f = false;
+    return f;
+}
+
 }  // namespace detail
 
 enum class EntityKind : uint8_t { In, Out, Wire, Reg, Mem };
@@ -145,22 +154,39 @@ public:
     void markDirtyBool(bool v) {
         if (actBits_ == nullptr) return;
         pushDeps();
-        if (v) {
-            pushWatch(posWatch_, posWatchN_, true);
-            for (uint32_t i = 0; i < negWatchN_; ++i) *negWatch_[i].prev = true;
-        } else {
-            pushWatch(negWatch_, negWatchN_, false);
-            for (uint32_t i = 0; i < posWatchN_; ++i) *posWatch_[i].prev = false;
+        const bool tm = detail::watchTraceMode();
+        const EdgeWatchDep* w = v ? posWatch_ : negWatch_;
+        const uint32_t n = v ? posWatchN_ : negWatchN_;
+        const EdgeWatchDep* ow = v ? negWatch_ : posWatch_;
+        const uint32_t on = v ? negWatchN_ : posWatchN_;
+        // 匹配方向：守卫预过滤——假则跳过即消费（edgeBit 模式零写入；
+        // prev 模式或 trace 模式推进历史）。激活 = actBit；单事件 watcher
+        // 的边沿事实由 edgeBit 给出（run() 测试并清除）。
+        for (uint32_t i = 0; i < n; ++i) {
+            if (w[i].guardVal != nullptr && !*w[i].guardVal) {
+                if (!w[i].eb || tm) *w[i].prev = v;
+            } else {
+                setBit(actBits_, w[i].execPos);
+                if (w[i].eb && !tm) setBit(edgeBits_, w[i].execPos);
+            }
         }
+        // 反向 watcher：edgeBit 模式下 prev 无人消费，非 trace 模式免维护。
+        for (uint32_t i = 0; i < on; ++i)
+            if (!ow[i].eb || tm) *ow[i].prev = v;
     }
 
     struct EdgeWatchDep {
         uint32_t execPos;
         bool* prev;  // the watcher's EventSlot::prev, kept current on skips
         // Level guard pre-filter (§5.2 push): non-null when the watcher has a
-        // guard; read at the transition — false means skip + consume edge.
-        const Entity* guard = nullptr;
-        bool (*guardRead)(const Entity*) = nullptr;
+        // guard — a direct pointer to the guard's (alias-resolved) bool
+        // storage, bound at elaboration, so the write-site filter is a single
+        // load rather than an indirect call; false means skip + consume edge.
+        const bool* guardVal = nullptr;
+        // EdgeBit 模式（§25 后续）：单事件 watcher 的边沿事实不再靠 prev
+        // 历史检测——写入点在匹配跳变时直接置该 watcher 的 edgeBit，
+        // run() 测试并清除；跳过与反向维护全部免除。trace 模式回退 prev。
+        bool eb = false;
     };
     void bindEdgeWatches(const EdgeWatchDep* pos, uint32_t posN, const EdgeWatchDep* neg,
                          uint32_t negN) {
@@ -171,11 +197,12 @@ public:
     }
 
     // Reverse dependency map row (CSR into SimState::depPool) plus the flat
-    // activity bitmap the row's bits are set into. Bound at elaboration.
-    void bindDeps(const uint32_t* deps, uint32_t n, uint64_t* actBits) {
+    // activity/edge bitmaps the row's bits are set into. Bound at elaboration.
+    void bindDeps(const uint32_t* deps, uint32_t n, uint64_t* actBits, uint64_t* edgeBits) {
         deps_ = deps;
         depN_ = n;
         actBits_ = actBits;
+        edgeBits_ = edgeBits;
     }
 
 protected:
@@ -189,20 +216,12 @@ private:
         for (uint32_t i = 0; i < depN_; ++i) setBit(actBits_, deps_[i]);
     }
     // Direction unknown (markDirty): unconditional notify, no prev touch —
-    // watchers maintain their own edge history when they run.
+    // watchers maintain their own edge history when they run. (EdgeBit 模式
+    // 在此路径不适用：方向未知，边沿事实无法确定，靠 run() 自检测——故
+    // markDirty 不过滤也不置 edgeBit；bool 事件信号的跳变全部走
+    // markDirtyBool，此路径的 watcher 实际只见非 bool 实体。)
     void pushWatch(const EdgeWatchDep* w, uint32_t n) {
         for (uint32_t i = 0; i < n; ++i) setBit(actBits_, w[i].execPos);
-    }
-    // Direction known (markDirtyBool): guard pre-filter — a watcher whose
-    // guard reads false cannot activate; consume the edge in place of its
-    // run() by advancing prev to the value it would have observed.
-    void pushWatch(const EdgeWatchDep* w, uint32_t n, bool v) {
-        for (uint32_t i = 0; i < n; ++i) {
-            if (w[i].guard != nullptr && !w[i].guardRead(w[i].guard))
-                *w[i].prev = v;
-            else
-                setBit(actBits_, w[i].execPos);
-        }
     }
 
     EntityKind kind_;
@@ -212,6 +231,7 @@ private:
     const uint32_t* deps_ = nullptr;      // CSR row into SimState::depPool
     uint32_t depN_ = 0;
     uint64_t* actBits_ = nullptr;         // flat activity bitmap
+    uint64_t* edgeBits_ = nullptr;        // flat edge-fact bitmap (§25 后续)
     const EdgeWatchDep* posWatch_ = nullptr;  // CSR rows into SimState watch pools
     uint32_t posWatchN_ = 0;
     const EdgeWatchDep* negWatch_ = nullptr;
