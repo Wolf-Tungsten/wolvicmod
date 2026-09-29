@@ -6,6 +6,7 @@
 #include "wolvicmod/core/action.h"
 #include "wolvicmod/core/module.h"
 #include "wolvicmod/dbg/audit.h"
+#include "wolvicmod/dbg/stats.h"
 #include "wolvicmod/elab/graph.h"
 #include "wolvicmod/sim/errors.h"
 
@@ -82,8 +83,10 @@ inline void Module::eval() {
     if (sim_ == nullptr) detail::fail("eval(): call elaborate() first ('" + hierPath() + "')");
     auto& sim = *sim_;
     const bool fullSweep = sim.trace != nullptr;
+    detail::statEval();
 
     for (size_t round = 0;; ++round) {
+        detail::statRound();
         if (sim.trace != nullptr) sim.trace->onRound(sim.evalCount, round);
 
         // Phase 1: combinational evaluation.
@@ -96,6 +99,8 @@ inline void Module::eval() {
                     const auto& item = sim.execOrder[pos];
                     if (item.single != nullptr) {
                         Action* a = item.single;
+                        if (a->kind() == Action::Kind::Assign)
+                            detail::statAssignRun();
                         if (sim.auditReads)
                             detail::auditRun(a);
                         else
@@ -199,6 +204,7 @@ inline void Module::eval() {
                     chain.typedCommit(chain.reg);
                 }
                 ++sim.committedN;
+                detail::statCommit();
                 if (sim.committed.size() < 64) sim.committed.push_back(chain.reg);
                 if (sim.trace != nullptr) sim.trace->onCommit(chain.reg);
                 return;
@@ -218,6 +224,7 @@ inline void Module::eval() {
             chain.updates.front()->finalizeTarget();
             const Entity* tgt = chain.updates.front()->target();
             ++sim.committedN;
+            detail::statCommit();
             if (sim.committed.size() < 64) sim.committed.push_back(tgt);
             if (sim.trace != nullptr) sim.trace->onCommit(tgt);
         };

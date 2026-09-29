@@ -408,7 +408,7 @@ inline void buildExecOrder(const FlatModel& flat, SimState& sim,
                      " but consumed at " + std::to_string(pos));
             if (const auto* w = filterable(pos, ri)) {
                 auto& pool = (w->kind == EdgeKind::Posedge) ? posW[ri] : negW[ri];
-                pool.push_back({pos, w->prev});
+                pool.push_back({pos, w->prev, w->guard, w->guardRead});
             } else {
                 sim.depPool[cursor[ri]++] = pos;
             }

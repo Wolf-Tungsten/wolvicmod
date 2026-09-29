@@ -12,6 +12,7 @@
 #include "wolvicmod/core/module.h"
 #include "wolvicmod/core/reg.h"
 #include "wolvicmod/core/signal.h"
+#include "wolvicmod/dbg/stats.h"
 #include "wolvicmod/sim/errors.h"
 
 namespace wolvicmod {
@@ -112,6 +113,10 @@ public:
         const Entity* sig;
         EdgeKind kind;
         bool* prev;  // the EventSlot::prev inside this action
+        // Level guard pre-filter (§5.2 push): the Update's guard, read at the
+        // transition — false means the edge is consumed without dispatch.
+        const Entity* guard = nullptr;
+        bool (*guardRead)(const Entity*) = nullptr;
     };
     const std::vector<EdgeWatch>& edgeWatches() const { return edgeWatches_; }
 
@@ -159,8 +164,9 @@ protected:
     void notifyIntent() {
         commitBits_[commitChain_ >> 6] |= uint64_t{1} << (commitChain_ & 63);
     }
-    void addEdgeWatch(const Entity* sig, EdgeKind kind, bool* prev) {
-        edgeWatches_.push_back({sig, kind, prev});
+    void addEdgeWatch(const Entity* sig, EdgeKind kind, bool* prev, const Entity* guard,
+                      bool (*guardRead)(const Entity*)) {
+        edgeWatches_.push_back({sig, kind, prev, guard, guardRead});
     }
 
 private:
@@ -279,7 +285,9 @@ public:
             }
             e.prev = cur;
         }
-        const bool active = edge && (guard_.ent == nullptr || guard_.read(guard_.ent));
+        const bool guardPass = guard_.ent == nullptr || guard_.read(guard_.ent);
+        detail::statUpdateRun(edge, guardPass);
+        const bool active = edge && guardPass;
         if (uint64_t* mb = memberBitsPtr(); mb != nullptr) {
             // Member-bitmap commit (§5.2): the chain descriptor's bitmap is
             // the intent source of truth — phase 2 clears it wholesale after
@@ -339,7 +347,7 @@ public:
     void registerEdgeWatch(const Entity* sig, EdgeKind kind) {
         for (auto& e : events_)
             if (e.sig == sig && e.kind == kind) {
-                addEdgeWatch(sig, kind, &e.prev);
+                addEdgeWatch(sig, kind, &e.prev, guard_.ent, guard_.read);
                 return;
             }
     }

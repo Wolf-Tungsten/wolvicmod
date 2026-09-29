@@ -132,14 +132,24 @@ public:
     // relies on one transition per entity per round, so entities driven from
     // inside an SCC group (steady-state iteration may rewrite them) are never
     // put into watch lists (see buildExecOrder).
+    //
+    // Guard pre-filter (§5.2 push): a watcher carrying a level guard whose
+    // current value is false cannot activate on this edge — active = edge &&
+    // guard, and the edge is known true at the write site. Skipping consumes
+    // the edge by advancing prev (exactly what its run() would do), so no
+    // dispatch happens at all. Correctness additionally requires the guard to
+    // hold its settled value across the clock pulse — the settle-then-pulse
+    // clocking convention (poke inputs + eval, then poke clock + eval) that
+    // all harnesses follow. markDirty() (direction unknown) cannot filter:
+    // it does not know the new value, so it cannot advance prev on a skip.
     void markDirtyBool(bool v) {
         if (actBits_ == nullptr) return;
         pushDeps();
         if (v) {
-            pushWatch(posWatch_, posWatchN_);
+            pushWatch(posWatch_, posWatchN_, true);
             for (uint32_t i = 0; i < negWatchN_; ++i) *negWatch_[i].prev = true;
         } else {
-            pushWatch(negWatch_, negWatchN_);
+            pushWatch(negWatch_, negWatchN_, false);
             for (uint32_t i = 0; i < posWatchN_; ++i) *posWatch_[i].prev = false;
         }
     }
@@ -147,6 +157,10 @@ public:
     struct EdgeWatchDep {
         uint32_t execPos;
         bool* prev;  // the watcher's EventSlot::prev, kept current on skips
+        // Level guard pre-filter (§5.2 push): non-null when the watcher has a
+        // guard; read at the transition — false means skip + consume edge.
+        const Entity* guard = nullptr;
+        bool (*guardRead)(const Entity*) = nullptr;
     };
     void bindEdgeWatches(const EdgeWatchDep* pos, uint32_t posN, const EdgeWatchDep* neg,
                          uint32_t negN) {
@@ -174,8 +188,21 @@ private:
     void pushDeps() {
         for (uint32_t i = 0; i < depN_; ++i) setBit(actBits_, deps_[i]);
     }
+    // Direction unknown (markDirty): unconditional notify, no prev touch —
+    // watchers maintain their own edge history when they run.
     void pushWatch(const EdgeWatchDep* w, uint32_t n) {
         for (uint32_t i = 0; i < n; ++i) setBit(actBits_, w[i].execPos);
+    }
+    // Direction known (markDirtyBool): guard pre-filter — a watcher whose
+    // guard reads false cannot activate; consume the edge in place of its
+    // run() by advancing prev to the value it would have observed.
+    void pushWatch(const EdgeWatchDep* w, uint32_t n, bool v) {
+        for (uint32_t i = 0; i < n; ++i) {
+            if (w[i].guard != nullptr && !w[i].guardRead(w[i].guard))
+                *w[i].prev = v;
+            else
+                setBit(actBits_, w[i].execPos);
+        }
     }
 
     EntityKind kind_;
