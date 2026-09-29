@@ -1,9 +1,10 @@
 #pragma once
 
 // Activation statistics (diagnostic): enabled by WV_STATS=1 in the
-// environment. One predictable branch per hook when disabled. Counters are
-// process-global (the engine is single-instance per process in every current
-// use), printed to stderr at exit.
+// environment. One predictable branch per hook when disabled (the flag is a
+// namespace-scope inline variable — no function-local static guard on the
+// hot path). Counters are process-global (the engine is single-instance per
+// process in every current use), printed to stderr at exit.
 
 #include <cstdint>
 #include <cstdio>
@@ -27,40 +28,37 @@ inline SimStats& simStats() {
     return s;
 }
 
-inline bool statsEnabled() {
-    static const bool on = [] {
-        const char* v = std::getenv("WV_STATS");
-        if (v == nullptr || v[0] == '\0' || v[0] == '0') return false;
-        std::atexit([] {
-            const SimStats& s = simStats();
-            std::fprintf(stderr,
-                         "[wv-stats] evals=%lu rounds=%lu assignRuns=%lu updateRuns=%lu\n"
-                         "[wv-stats]   upd: edge+guard=%lu edgeOnly=%lu noEdge=%lu\n"
-                         "[wv-stats]   commits=%lu  (runs/eval: assign=%.1f update=%.1f)\n",
-                         (unsigned long)s.evals, (unsigned long)s.rounds,
-                         (unsigned long)s.assignRuns, (unsigned long)s.updateRuns,
-                         (unsigned long)s.updEdgeGuardTrue,
-                         (unsigned long)(s.updEdgeHit - s.updEdgeGuardTrue),
-                         (unsigned long)s.updNoEdge, (unsigned long)s.commits,
-                         s.evals ? double(s.assignRuns) / s.evals : 0.0,
-                         s.evals ? double(s.updateRuns) / s.evals : 0.0);
-        });
-        return true;
-    }();
-    return on;
-}
+inline const bool kStatsOn = [] {
+    const char* v = std::getenv("WV_STATS");
+    if (v == nullptr || v[0] == '\0' || v[0] == '0') return false;
+    std::atexit([] {
+        const SimStats& s = simStats();
+        std::fprintf(stderr,
+                     "[wv-stats] evals=%lu rounds=%lu assignRuns=%lu updateRuns=%lu\n"
+                     "[wv-stats]   upd: edge+guard=%lu edgeOnly=%lu noEdge=%lu\n"
+                     "[wv-stats]   commits=%lu  (runs/eval: assign=%.1f update=%.1f)\n",
+                     (unsigned long)s.evals, (unsigned long)s.rounds,
+                     (unsigned long)s.assignRuns, (unsigned long)s.updateRuns,
+                     (unsigned long)s.updEdgeGuardTrue,
+                     (unsigned long)(s.updEdgeHit - s.updEdgeGuardTrue),
+                     (unsigned long)s.updNoEdge, (unsigned long)s.commits,
+                     s.evals ? double(s.assignRuns) / s.evals : 0.0,
+                     s.evals ? double(s.updateRuns) / s.evals : 0.0);
+    });
+    return true;
+}();
 
 inline void statEval() {
-    if (statsEnabled()) ++simStats().evals;
+    if (kStatsOn) ++simStats().evals;
 }
 inline void statRound() {
-    if (statsEnabled()) ++simStats().rounds;
+    if (kStatsOn) ++simStats().rounds;
 }
 inline void statAssignRun() {
-    if (statsEnabled()) ++simStats().assignRuns;
+    if (kStatsOn) ++simStats().assignRuns;
 }
 inline void statUpdateRun(bool edge, bool guardPass) {
-    if (statsEnabled()) {
+    if (kStatsOn) {
         ++simStats().updateRuns;
         if (edge) {
             ++simStats().updEdgeHit;
@@ -71,7 +69,7 @@ inline void statUpdateRun(bool edge, bool guardPass) {
     }
 }
 inline void statCommit() {
-    if (statsEnabled()) ++simStats().commits;
+    if (kStatsOn) ++simStats().commits;
 }
 
 }  // namespace wolvicmod::detail
